@@ -1,0 +1,32 @@
+server:
+  port: 8883
+
+spring:
+  application:
+    name: @artifactId@
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${nacos-host}:${nacos-port}
+        namespace: ${nacos-namespace}
+        group: ${nacos-group}
+        username: ${nacos-user-name}
+        password: ${nacos-password}
+      config:
+        username: ${spring.cloud.nacos.discovery.username}
+        password: ${spring.cloud.nacos.discovery.password}
+        server-addr: ${spring.cloud.nacos.discovery.server-addr}
+        file-extension: yml
+        group: ${spring.cloud.nacos.discovery.group}
+        namespace: ${spring.cloud.nacos.discovery.namespace}
+
+logging:
+  level:
+    root: info
+  file:
+    path: mqttx/logs
+
+mqttx:
+  version: @version@
+  # kryo 比 json 更具优势
+  serialize-strategy: kryo

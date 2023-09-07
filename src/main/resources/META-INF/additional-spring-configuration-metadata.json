@@ -1,0 +1,37 @@
+{
+  "hints": [
+    {
+      "name": "mqttx.ssl.key-store-type",
+      "values": [
+        {
+          "value": "pkcs12"
+        },
+        {
+          "value": "jks"
+        }
+      ]
+    },
+    {
+      "name": "mqttx.cluster.type",
+      "values": [
+        {
+          "value": "redis"
+        },
+        {
+          "value": "kafka"
+        }
+      ]
+    },
+    {
+      "name": "mqttx.serialize-strategy",
+      "values": [
+        {
+          "value": "json"
+        },
+        {
+          "value": "kryo"
+        }
+      ]
+    }
+  ]
+}

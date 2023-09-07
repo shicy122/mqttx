@@ -1,0 +1,35 @@
+# 开发环境配置文件
+server:
+  # 服务器的HTTP端口，默认为 8883
+  port: 8883
+
+# Spring配置
+spring:
+  application:
+    name: @artifactId@
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_HOST:139.9.72.201}:${NACOS_PORT:30013}
+        namespace: 3ef11701-fbde-46d6-a758-d4becbd8ca53
+        group: DEFAULT_GROUP
+        username: nacos
+        password: hycan@_666
+      config:
+        username: ${spring.cloud.nacos.discovery.username}
+        password: ${spring.cloud.nacos.discovery.password}
+        server-addr: ${spring.cloud.nacos.discovery.server-addr}
+        group: ${spring.cloud.nacos.discovery.group}
+        namespace: ${spring.cloud.nacos.discovery.namespace}
+        file-extension: yml
+
+logging:
+  level:
+    root: info
+  file:
+    path: mqttx/logs
+
+mqttx:
+  version: @version@
+  # kryo 比 json 更具优势
+  serialize-strategy: kryo
