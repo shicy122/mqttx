@@ -21,6 +21,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * 订阅相关服务, 为两种主题提供服务:
@@ -42,12 +43,20 @@ public interface ISubscriptionService {
     Mono<Void> subscribe(ClientSub clientSub);
 
     /**
+     * 将客户端订阅存储到缓存
+     *
+     * @param clientSub 客户端端订阅
+     */
+    void subscribeWithCache(ClientSub clientSub);
+
+    /**
      * 解除订阅
      *
-     * @param clientId 客户id
-     * @param topics   主题列表
+     * @param clientId                客户id
+     * @param topics                  主题列表
+     * @param isPublishClusterMessage 是否发布集群消息
      */
-    Mono<Void> unsubscribe(String clientId, boolean cleanSession, List<String> topics);
+    Mono<Void> unsubscribe(String clientId, boolean cleanSession, List<String> topics, boolean isPublishClusterMessage);
 
     /**
      * 获取订阅了 topic 的客户id
@@ -58,21 +67,13 @@ public interface ISubscriptionService {
     Flux<ClientSub> searchSubscribeClientList(String topic);
 
     /**
-     * 移除客户订阅
+     * 移除客户订阅 (cleanSession变化时调用该方法)
      *
-     * @param clientId     客户ID
-     * @param cleanSession 清理类型，true 清理 cleanSession = 1, false清理 cleanSession = 0
+     * @param clientId                客户ID
+     * @param cleanSession            清理类型，true 清理 cleanSession = 1, false清理 cleanSession = 0
+     * @param isPublishClusterMessage 是否发布集群消息
      */
-    Mono<Void> clearClientSubscriptions(String clientId, boolean cleanSession);
-
-    /**
-     * 移除未包含在 authorizedSub 集合中的客户端订阅
-     *
-     * @param clientId      客户端ID
-     * @param authorizedSub 客户端被允许订阅的 topic 集合
-     */
-    Mono<Void> clearUnAuthorizedClientSub(String clientId, List<String> authorizedSub);
-
+    Mono<Void> clearClientSubscriptions(String clientId, boolean cleanSession, boolean isPublishClusterMessage);
 
     /**
      * 获取订阅系统主题 topic 的客户端集合
@@ -84,24 +85,32 @@ public interface ISubscriptionService {
     /**
      * 保存系统主题客户订阅
      *
-     * @param clientSub        客户订阅
-     * @param isClusterMessage 是否集群消息
+     * @param clientSub               客户订阅
+     * @param isPublishClusterMessage 是否发布集群消息
      */
-    Mono<Void> subscribeSys(ClientSub clientSub, boolean isClusterMessage);
+    Mono<Void> subscribeSys(ClientSub clientSub, boolean isPublishClusterMessage);
 
     /**
      * 解除客户系统主题订阅
      *
-     * @param clientId         客户 id
-     * @param topics           主题列表
-     * @param isClusterMessage 是否集群消息
+     * @param clientId                客户 id
+     * @param topics                  主题列表
+     * @param isPublishClusterMessage 是否发布集群消息
      */
-    Mono<Void> unsubscribeSys(String clientId, List<String> topics, boolean isClusterMessage);
+    Mono<Void> unsubscribeSys(String clientId, List<String> topics, boolean isPublishClusterMessage);
 
     /**
      * 清理客户订阅的系统主题
      *
-     * @param clientId 客户 id
+     * @param clientId                客户 id
+     * @param isPublishClusterMessage 是否发布集群消息
      */
-    Mono<Void> clearClientSysSub(String clientId);
+    Mono<Void> clearClientSysSub(String clientId, boolean isPublishClusterMessage);
+
+    /**
+     * 获取所有客户端订阅列表
+     *
+     * @return 客户端订阅列表
+     */
+    Set<ClientSub> getAllClientSubs();
 }

@@ -26,6 +26,7 @@ import java.io.ByteArrayOutputStream;
 /**
  * 基于 <strong>kryo</strong> 序列化框架实现
  *
+ * @author shichongying
  * @since 1.0.7
  */
 public class KryoSerializer implements Serializer {

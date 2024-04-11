@@ -29,6 +29,7 @@ import reactor.core.publisher.Mono;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -38,7 +39,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
 
 import static com.hycan.idn.mqttx.constants.ShareStrategyEnum.hash;
 import static com.hycan.idn.mqttx.constants.ShareStrategyEnum.random;
@@ -58,10 +58,7 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
     //@formatter:off
 
     private static final int ASSUME_COUNT = 100_000;
-    /**
-     * 按顺序 -> 订阅，解除订阅，删除 topic
-     */
-    private static final int SUB = 1, UN_SUB = 2;
+
     private final ReactiveMongoTemplate mongoTemplate;
     private final Serializer serializer;
     private final IInternalMessageService internalMessageService;
@@ -69,8 +66,8 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
      * 共享主题轮询策略
      */
     private final ShareStrategyEnum shareStrategyEnum;
-    private final boolean enableCluster, enableShareTopic, enableFilterTopic;
-    private final String brokerId, topicPrefix, SUB_UNSUB;
+    private final boolean enableCluster, enableShareTopic, enableFilterTopic, enableLog;
+    private final String brokerId, topicPrefix, topicSuffix, SUB_UNSUB;
     /**
      * 共享订阅轮询，存储轮询参数
      */
@@ -89,14 +86,18 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
      */
     private final Map<String, Set<ClientSub>> allTopicClientsMap = new ConcurrentHashMap<>(ASSUME_COUNT);
     /**
-     * client -> topics 关系集合，仅缓存 cleanSession == true 对应的 topics
+     * client -> topics 关系集合，缓存 cleanSession == true 对应的 topics
      */
     private final Map<String, Set<String>> inMemClientTopicsMap = new ConcurrentHashMap<>(ASSUME_COUNT);
 
     /**
-     * 系统主题 -> clients map
+     * SYS topic -> clients 关系集合，仅缓存订阅系统 topic 对应的 clients
      */
     private final Map<String, Set<ClientSub>> sysTopicClientsMap = new ConcurrentHashMap<>();
+    /**
+     * SYS client -> topics 关系集合，仅缓存订阅系统 client 对应的 topics
+     */
+    private final Map<String, Set<String>> sysClientTopicsMap = new ConcurrentHashMap<>(ASSUME_COUNT);
 
     //@formatter:on
     public SubscriptionServiceImpl(ReactiveMongoTemplate mongoTemplate,
@@ -108,6 +109,7 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
         this.mongoTemplate = mongoTemplate;
         this.serializer = serializer;
         this.internalMessageService = internalMessageService;
+        this.enableLog = mqttxConfig.getSysConfig().getEnableLog();
 
         MqttxConfig.ShareTopic shareTopic = mqttxConfig.getShareTopic();
         this.enableShareTopic = shareTopic.getEnable();
@@ -124,6 +126,7 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
         MqttxConfig.FilterTopic filterTopic = mqttxConfig.getFilterTopic();
         this.enableFilterTopic = filterTopic.getEnable();
         this.topicPrefix = filterTopic.getTopicPrefix();
+        this.topicSuffix = filterTopic.getTopicSuffix();
 
         initInnerCache();
     }
@@ -178,7 +181,7 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
         // 广播订阅事件
         if (enableCluster) {
             InternalMessage<ClientSubOrUnsubMsg> im = new InternalMessage<>(
-                    ClientSubOrUnsubMsg.of(clientId, qos, topic, cleanSession, false, SUB),
+                    ClientSubOrUnsubMsg.of(clientId, qos, topic, cleanSession, false, ClientSubOrUnsubMsg.SUB),
                     System.currentTimeMillis(), brokerId);
             internalMessageService.publish(im, SUB_UNSUB);
         }
@@ -207,7 +210,7 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
      * @param topics       主题列表
      */
     @Override
-    public Mono<Void> unsubscribe(String clientId, boolean cleanSession, List<String> topics) {
+    public Mono<Void> unsubscribe(String clientId, boolean cleanSession, List<String> topics, boolean isPublishClusterMessage) {
         if (CollectionUtils.isEmpty(topics)) {
             return Mono.empty();
         }
@@ -216,9 +219,9 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
         unsubscribeWithCache(clientId, topics);
 
         // 集群广播
-        if (enableCluster) {
+        if (enableCluster && isPublishClusterMessage) {
             InternalMessage<ClientSubOrUnsubMsg> im = new InternalMessage<>(
-                    ClientSubOrUnsubMsg.of(clientId, topics, cleanSession, false, UN_SUB),
+                    ClientSubOrUnsubMsg.of(clientId, topics, cleanSession, false, ClientSubOrUnsubMsg.UN_SUB),
                     System.currentTimeMillis(), brokerId);
             internalMessageService.publish(im, SUB_UNSUB);
         }
@@ -241,7 +244,6 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
      */
     @Override
     public Flux<ClientSub> searchSubscribeClientList(String topic) {
-        // result
         List<ClientSub> clientSubList = new ArrayList<>();
 
         if (nonWildcardOrShareTopics.contains(topic)) {
@@ -251,7 +253,7 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
             });
         }
 
-        if (!enableFilterTopic || topic.startsWith(topicPrefix)) {
+        if (!enableFilterTopic || topic.startsWith(topicPrefix) || topic.endsWith(topicSuffix)) {
             List<ClientSub> shareClientSubList = new ArrayList<>();
             for (String subTopic : incWildcardOrShareTopics) {
                 if (TopicUtils.match(topic, subTopic)) {
@@ -268,11 +270,14 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
             }
 
             ClientSub clientSub = chooseShareClient(shareClientSubList, topic);
-            if(Objects.nonNull(clientSub)) {
+            if (Objects.nonNull(clientSub)) {
                 clientSubList.add(clientSub);
             }
         }
 
+        if (CollectionUtils.isEmpty(clientSubList)) {
+            log.warn("订阅Topic=[{}]的客户端列表为空!", topic);
+        }
         return Flux.fromIterable(clientSubList);
     }
 
@@ -342,35 +347,21 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
     }
 
     @Override
-    public Mono<Void> clearClientSubscriptions(String clientId, boolean cleanSession) {
+    public Mono<Void> clearClientSubscriptions(String clientId, boolean cleanSession, boolean isPublishClusterMessage) {
         // cleanSession == true 则从缓存中取出满足条件的 topics
         if (cleanSession) {
             Set<String> keys = inMemClientTopicsMap.remove(clientId);
             if (CollectionUtils.isEmpty(keys)) {
                 return Mono.empty();
             }
-            return unsubscribe(clientId, true, new ArrayList<>(keys));
+            return unsubscribe(clientId, true, new ArrayList<>(keys), isPublishClusterMessage);
         } else {
             Query query = Query.query(Criteria.where(MongoConstants.CLIENT_ID).is(clientId));
-
             return mongoTemplate.find(query, MqttxSubscribe.class)
                     .map(MqttxSubscribe::getTopic)
                     .collectList()
-                    .flatMap(topics -> unsubscribe(clientId, false, new ArrayList<>(topics)));
+                    .flatMap(topics -> unsubscribe(clientId, false, new ArrayList<>(topics), isPublishClusterMessage));
         }
-    }
-
-    @Override
-    public Mono<Void> clearUnAuthorizedClientSub(String clientId, List<String> authorizedSub) {
-        Set<String> collect = nonWildcardOrShareTopics.stream()
-                .filter(topic -> !authorizedSub.contains(topic)).collect(Collectors.toSet());
-
-        collect.addAll(incWildcardOrShareTopics.stream()
-                .filter(topic -> !authorizedSub.contains(topic)).collect(Collectors.toSet()));
-
-        return Mono.when(
-                unsubscribe(clientId, false, new ArrayList<>(collect)),
-                unsubscribe(clientId, true, new ArrayList<>(collect)));
     }
 
     @Override
@@ -389,19 +380,19 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
         final boolean isSysTopic = data.isSysTopic();
 
         switch (data.getType()) {
-            case SUB -> {
+            case ClientSubOrUnsubMsg.SUB -> {
                 ClientSub clientSub = ClientSub.of(data.getClientId(), data.getQos(), data.getTopic(), data.isCleanSession());
                 if (isSysTopic) {
-                    subscribeSys(clientSub, true).subscribe();
+                    subscribeSys(clientSub, false).subscribe();
                 } else {
                     subscribeWithCache(clientSub);
                 }
             }
-            case UN_SUB -> {
+            case ClientSubOrUnsubMsg.UN_SUB -> {
                 String clientId = data.getClientId();
                 List<String> topics = data.getTopics();
                 if (isSysTopic) {
-                    unsubscribeSys(clientId, topics, true).subscribe();
+                    unsubscribeSys(clientId, topics, false).subscribe();
                 } else {
                     unsubscribeWithCache(data.getClientId(), data.getTopics());
                 }
@@ -420,10 +411,13 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
      *
      * @param clientSub 客户端端订阅
      */
-    private void subscribeWithCache(ClientSub clientSub) {
+    @Override
+    public void subscribeWithCache(ClientSub clientSub) {
         String topic = clientSub.getTopic();
         String clientId = clientSub.getClientId();
-        log.debug("缓存订阅信息: 客户端ID=[{}], Topic=[{}]", clientId, topic);
+        if (enableLog) {
+            log.info("缓存订阅信息: 客户端ID=[{}], Topic=[{}]", clientId, topic);
+        }
 
         if (TopicUtils.isWildcard(topic) || TopicUtils.isShare(topic)) {
             incWildcardOrShareTopics.add(topic);
@@ -444,7 +438,9 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
      * @param topics   主题列表
      */
     private void unsubscribeWithCache(String clientId, List<String> topics) {
-        log.debug("移除订阅信息: 客户端ID=[{}], Topic列表=[{}]", clientId, topics);
+        if (Boolean.TRUE.equals(enableLog)) {
+            log.info("移除订阅信息: 客户端ID=[{}], Topic列表={}", clientId, topics);
+        }
         topics.forEach(topic -> {
             Set<ClientSub> clientSubs = allTopicClientsMap.get(topic);
             if (!CollectionUtils.isEmpty(clientSubs)) {
@@ -463,7 +459,7 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
             }
         });
 
-        Optional.ofNullable(inMemClientTopicsMap.get(clientId)).ifPresent(topicList -> topicList.removeAll(topics));
+        Optional.ofNullable(inMemClientTopicsMap.get(clientId)).ifPresent(topicList -> topics.forEach(topicList::remove));
     }
 
     @Override
@@ -483,7 +479,7 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
         });
 
         ClientSub clientSub = chooseShareClient(shareClientSubList, topic);
-        if(Objects.nonNull(clientSub)) {
+        if (Objects.nonNull(clientSub)) {
             clientSubList.add(clientSub);
         }
 
@@ -491,14 +487,18 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
     }
 
     @Override
-    public Mono<Void> subscribeSys(ClientSub clientSub, boolean isClusterMessage) {
-        sysTopicClientsMap.computeIfAbsent(clientSub.getTopic(), k -> ConcurrentHashMap.newKeySet()).add(clientSub);
+    public Mono<Void> subscribeSys(ClientSub clientSub, boolean isPublishClusterMessage) {
+        String clientId = clientSub.getClientId();
+        String topic = clientSub.getTopic();
+
+        log.info("缓存SYS订阅信息: 客户端ID=[{}], Topic=[{}], 是否发送集群消息=[{}]", clientId, topic, isPublishClusterMessage);
+        sysTopicClientsMap.computeIfAbsent(topic, k -> ConcurrentHashMap.newKeySet()).add(clientSub);
+        sysClientTopicsMap.computeIfAbsent(clientId, s -> ConcurrentHashMap.newKeySet()).add(topic);
 
         // 集群广播
-        String topic = clientSub.getTopic();
-        if (enableCluster && !isClusterMessage && TopicUtils.isSysEvent(topic)) {
+        if (enableCluster && isPublishClusterMessage && TopicUtils.isSysEvent(topic)) {
             InternalMessage<ClientSubOrUnsubMsg> im = new InternalMessage<>(
-                    ClientSubOrUnsubMsg.of(clientSub.getClientId(), 0, topic, false, true, SUB),
+                    ClientSubOrUnsubMsg.of(clientId, 0, topic, false, true, ClientSubOrUnsubMsg.SUB),
                     System.currentTimeMillis(), brokerId);
             internalMessageService.publish(im, SUB_UNSUB);
         }
@@ -507,7 +507,11 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
     }
 
     @Override
-    public Mono<Void> unsubscribeSys(String clientId, List<String> topics, boolean isClusterMessage) {
+    public Mono<Void> unsubscribeSys(String clientId, List<String> topics, boolean isPublishClusterMessage) {
+        Optional.ofNullable(sysClientTopicsMap.get(clientId)).ifPresent(topicList -> topics.forEach(topicList::remove));
+        log.info("移除SYS订阅信息: 客户端ID=[{}], Topic列表=[{}], 是否发送集群消息=[{}]",
+                clientId, topics, isPublishClusterMessage);
+
         for (String topic : topics) {
             Set<ClientSub> clientSubs = sysTopicClientsMap.get(topic);
             if (!CollectionUtils.isEmpty(clientSubs)) {
@@ -516,9 +520,9 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
         }
 
         // 集群广播
-        if (enableCluster && !isClusterMessage) {
+        if (enableCluster && isPublishClusterMessage) {
             InternalMessage<ClientSubOrUnsubMsg> im = new InternalMessage<>(
-                    ClientSubOrUnsubMsg.of(clientId, topics, false, true, UN_SUB),
+                    ClientSubOrUnsubMsg.of(clientId, topics, false, true, ClientSubOrUnsubMsg.UN_SUB),
                     System.currentTimeMillis(), brokerId);
             internalMessageService.publish(im, SUB_UNSUB);
         }
@@ -527,8 +531,24 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
     }
 
     @Override
-    public Mono<Void> clearClientSysSub(String clientId) {
-        List<String> topics = sysTopicClientsMap.keySet().stream().toList();
-        return unsubscribeSys(clientId, topics, false);
+    public Mono<Void> clearClientSysSub(String clientId, boolean isPublishClusterMessage) {
+        if (sysClientTopicsMap.containsKey(clientId)) {
+            return unsubscribeSys(clientId, new ArrayList<>(sysClientTopicsMap.get(clientId)), isPublishClusterMessage);
+        }
+        return Mono.empty();
+    }
+
+    @Override
+    public Set<ClientSub> getAllClientSubs() {
+        Set<ClientSub> clientSubs = new HashSet<>();
+        for (Set<ClientSub> subSet : allTopicClientsMap.values()) {
+            clientSubs.addAll(subSet);
+        }
+
+        for (Set<ClientSub> subSet : sysTopicClientsMap.values()) {
+            clientSubs.addAll(subSet);
+        }
+
+        return clientSubs;
     }
 }

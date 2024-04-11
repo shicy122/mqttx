@@ -18,6 +18,7 @@ package com.hycan.idn.mqttx.pojo;
 
 import com.hycan.idn.mqttx.entity.MqttxOfflineMsg;
 import com.hycan.idn.mqttx.entity.MqttxRetainMsg;
+import com.hycan.idn.mqttx.utils.BytesUtil;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -70,6 +71,33 @@ public class PubMsg {
     private byte[] payload;
 
     //@formatter:on
+
+    @Override
+    public String toString() {
+        return "PubMsg{" +
+                "clientId='" + clientId + '\'' +
+                ", qos=" + qos +
+                ", messageId=" + messageId +
+                ", topic='" + topic + '\'' +
+                ", retain=" + retain +
+                ", will=" + will +
+                ", dup=" + dup +
+                ", payload=" + BytesUtil.bytesToHexString(payload) +
+                '}';
+    }
+
+    public static PubMsg of(PubMsg pubMsg, String clientId) {
+        return PubMsg.builder()
+                .clientId(clientId)
+                .qos(pubMsg.getQos())
+                .messageId(pubMsg.getMessageId())
+                .topic(pubMsg.getTopic())
+                .payload(pubMsg.getPayload())
+                .retain(pubMsg.isRetain())
+                .will(pubMsg.isWill())
+                .dup(pubMsg.isDup())
+                .build();
+    }
 
     public static PubMsg of(int qos, String topic, byte[] payload) {
         return PubMsg.builder()

@@ -1,7 +1,10 @@
 package com.hycan.idn.mqttx.pojo;
 
+import lombok.AllArgsConstructor;
 import lombok.Data;
+import lombok.NoArgsConstructor;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -10,16 +13,27 @@ import java.util.List;
  * @author shichongying
  */
 @Data
+@NoArgsConstructor
+@AllArgsConstructor
 public class SyncMsg {
 
     private String instanceId;
 
     private List<String> clientIds;
 
-    public static SyncMsg of(String instanceId, List<String> clientIds) {
+    private List<ClientSub> clientSubs;
+
+    public static SyncMsg ofClientIds(String instanceId, List<String> clientIds) {
         SyncMsg syncMsg = new SyncMsg();
         syncMsg.setInstanceId(instanceId);
-        syncMsg.setClientIds(clientIds);
+        syncMsg.setClientIds(new ArrayList<>(clientIds));
+        return syncMsg;
+    }
+
+    public static SyncMsg ofClientSubs(String instanceId, List<ClientSub> clientSubs) {
+        SyncMsg syncMsg = new SyncMsg();
+        syncMsg.setInstanceId(instanceId);
+        syncMsg.setClientSubs(new ArrayList<>(clientSubs));
         return syncMsg;
     }
 }

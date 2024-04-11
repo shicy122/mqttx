@@ -33,3 +33,12 @@ mqttx:
   version: @version@
   # kryo 比 json 更具优势
   serialize-strategy: kryo
+
+management:
+  endpoint:
+    health:
+      group:
+        readiness:
+          include:
+            - ping
+            - custom

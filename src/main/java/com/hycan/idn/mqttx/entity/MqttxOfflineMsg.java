@@ -1,6 +1,7 @@
 package com.hycan.idn.mqttx.entity;
 
 import com.hycan.idn.mqttx.pojo.PubMsg;
+import com.hycan.idn.mqttx.utils.BytesUtil;
 import lombok.Builder;
 import lombok.Data;
 import org.springframework.data.annotation.Id;
@@ -65,6 +66,20 @@ public class MqttxOfflineMsg {
     private LocalDateTime retryTime;
 
     //@formatter:on
+
+
+    @Override
+    public String toString() {
+        return "MqttxOfflineMsg{" +
+                "clientId='" + clientId + '\'' +
+                ", topic='" + topic + '\'' +
+                ", qos=" + qos +
+                ", messageId=" + messageId +
+                ", payload=" + BytesUtil.bytesToHexString(payload) +
+                ", recordTime=" + recordTime +
+                ", retryTime=" + retryTime +
+                '}';
+    }
 
     public static MqttxOfflineMsg of(PubMsg pubMsg) {
         return MqttxOfflineMsg.builder()

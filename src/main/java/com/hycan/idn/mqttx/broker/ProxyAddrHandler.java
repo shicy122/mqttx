@@ -11,7 +11,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 /**
+ * 获取代理IP地址Handler
  *
+ * @author shichongying
+ * @datetime 2023-11-01 09:12
  */
 @Slf4j
 @ChannelHandler.Sharable

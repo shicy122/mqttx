@@ -7,6 +7,15 @@ package com.hycan.idn.mqttx.constants;
 public interface MongoConstants {
     //@formatter:off
 
+    /** 用户名 */
+    String USER_NAME = "username";
+
+    String PASSWORD = "password";
+
+    String SALT = "salt";
+
+    String IS_SUPER_USER = "is_super_user";
+
     /** 客户端ID **/
     String CLIENT_ID = "client_id";
 

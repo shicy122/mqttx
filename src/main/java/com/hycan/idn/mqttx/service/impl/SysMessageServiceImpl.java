@@ -1,19 +1,24 @@
 package com.hycan.idn.mqttx.service.impl;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.hycan.idn.mqttx.broker.BrokerHandler;
 import com.hycan.idn.mqttx.config.MqttxConfig;
+import com.hycan.idn.mqttx.consumer.Watcher;
 import com.hycan.idn.mqttx.pojo.ClientConnOrDiscMsg;
+import com.hycan.idn.mqttx.pojo.InternalMessage;
+import com.hycan.idn.mqttx.pojo.SysMsg;
+import com.hycan.idn.mqttx.service.IInternalMessageService;
 import com.hycan.idn.mqttx.service.ISubscriptionService;
 import com.hycan.idn.mqttx.service.ISysMessageService;
+import com.hycan.idn.mqttx.utils.JSON;
+import com.hycan.idn.mqttx.utils.JsonSerializer;
 import com.hycan.idn.mqttx.utils.Serializer;
 import com.hycan.idn.mqttx.utils.TopicUtils;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.handler.codec.mqtt.MqttMessageBuilders;
-import io.netty.handler.codec.mqtt.MqttPublishMessage;
 import io.netty.handler.codec.mqtt.MqttQoS;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
@@ -21,8 +26,7 @@ import org.springframework.util.Assert;
 import reactor.core.publisher.Mono;
 
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.time.LocalDateTime;
+import java.util.Objects;
 import java.util.Optional;
 
 import static com.hycan.idn.mqttx.broker.handler.ConnectHandler.CLIENT_MAP;
@@ -35,34 +39,37 @@ import static com.hycan.idn.mqttx.broker.handler.ConnectHandler.CLIENT_MAP;
  */
 @Slf4j
 @Service
-public class SysMessageServiceImpl implements ISysMessageService {
+public class SysMessageServiceImpl implements ISysMessageService, Watcher {
 
-    /** 上线事件超时时间 30 秒 */
+    /**
+     * 上线事件超时时间 30 秒
+     */
     private static final int SYS_EVENT_EXPIRE_MILLIS = 30 * 1000;
-
-    private final ReactiveStringRedisTemplate redisTemplate;
 
     private final ISubscriptionService subscriptionService;
 
+    private final IInternalMessageService internalMessageService;
+
     private final Serializer serializer;
 
-    private final String  clientSysMsgPrefix, brokerId;
-    private final boolean enableSysTopic, enableSysBridge;
+    private final String brokerId, SYS;
+    private final boolean enableSysTopic, enableSysBridge, isClusterMode;
 
     private String kafkaBridgeTopic;
     private KafkaTemplate<String, byte[]> kafkaTemplate;
 
     public SysMessageServiceImpl(MqttxConfig config,
-                                 ReactiveStringRedisTemplate redisTemplate,
                                  @Nullable KafkaTemplate<String, byte[]> kafkaTemplate,
                                  ISubscriptionService subscriptionService,
+                                 IInternalMessageService internalMessageService,
                                  Serializer serializer) {
-        this.redisTemplate = redisTemplate;
         this.subscriptionService = subscriptionService;
 
         this.brokerId = config.getBrokerId();
         this.enableSysTopic = config.getSysTopic().getEnable();
         this.enableSysBridge = config.getMessageBridge().getEnableSys();
+        this.internalMessageService = internalMessageService;
+        this.serializer = serializer;
         if (Boolean.TRUE.equals(enableSysBridge)) {
             this.kafkaTemplate = kafkaTemplate;
             this.kafkaBridgeTopic = config.getMessageBridge().getKafkaSysBridgeTopic();
@@ -70,8 +77,8 @@ public class SysMessageServiceImpl implements ISysMessageService {
             Assert.notNull(kafkaBridgeTopic, "消息桥接Kafka主题不能为空!!!");
         }
 
-        this.clientSysMsgPrefix = config.getRedis().getClientSysMsgPrefix();
-        this.serializer = serializer;
+        this.SYS = config.getKafka().getSys();
+        this.isClusterMode = config.getCluster().getEnable();
     }
 
     /**
@@ -104,51 +111,44 @@ public class SysMessageServiceImpl implements ISysMessageService {
             return Mono.empty();
         }
 
-        // publish 对象组装
-        var bytes = LocalDateTime.now().toString().getBytes(StandardCharsets.UTF_8);
-        var currentTime = Unpooled.buffer(bytes.length).writeBytes(bytes);
-        var mpm = MqttMessageBuilders.publish()
-                .qos(MqttQoS.AT_MOST_ONCE)
-                .retained(false)
-                .topicName(topic)
-                .payload(currentTime)
-                .build();
-
         return subscriptionService.searchSysTopicClients(topic)
-                .flatMap(clientSub -> {
-                    Optional<Channel> channelOptional = Optional.ofNullable(CLIENT_MAP.get(clientSub.getClientId()))
-                            .map(BrokerHandler.CHANNELS::find);
-                    if (channelOptional.isPresent()) {
-                        return publish(msg, mpm, clientSub.getTopic(), channelOptional.get());
-                    }
-                    return Mono.empty();
-                })
-                .doOnComplete(mpm::release)
+                .flatMap(clientSub -> publish(clientSub.getClientId(), topic, msg.getTimestamp(), false))
                 .then();
     }
 
     /**
      * 发布系统消息
      *
-     * @param msg       客户端上/下线集群消息
-     * @param mpm       组装完整的消息
-     * @param topic     订阅系统事件的客户端 Topic
-     * @param channel   订阅系统事件客户端对应的 channel
+     * @param sysClientId         订阅系统消息的客户端ID
+     * @param sysTopic            订阅系统消息对应的topic
+     * @param disconnectTimestamp 客户端下线时间戳
      */
-    private Mono<Void> publish(ClientConnOrDiscMsg msg, MqttPublishMessage mpm, String topic, Channel channel) {
-        if (!TopicUtils.isShare(topic)) {
-            channel.writeAndFlush(mpm.retain());
+    private Mono<Void> publish(String sysClientId, String sysTopic, Long disconnectTimestamp, boolean isClusterMsg) {
+        Channel channel = Optional.ofNullable(CLIENT_MAP.get(sysClientId))
+                .map(BrokerHandler.CHANNELS::find)
+                .orElse(null);
+
+        if (Objects.isNull(channel)) {
+            if (isClusterMode && !isClusterMsg) {
+                SysMsg msg = SysMsg.of(sysClientId, sysTopic, disconnectTimestamp);
+                internalMessageService.publish(
+                        new InternalMessage<>(msg, System.currentTimeMillis(), brokerId), SYS);
+            }
             return Mono.empty();
         }
 
-        // 共享订阅上下线主题的客户端，只能有其中一个客户端接收上下线消息，这里使用 setnx 加锁处理，集群内 mqttx 节点竞争到锁则发消息
-        return redisTemplate.opsForValue().setIfAbsent(key(msg), msg.getType(), Duration.ofSeconds(30))
-                .doOnSuccess(isSuccess -> {
-                    if (Boolean.TRUE.equals(isSuccess)) {
-                        channel.writeAndFlush(mpm.retain());
-                    }
-                })
-                .then();
+        // publish 对象组装
+        var bytes = disconnectTimestamp.toString().getBytes(StandardCharsets.UTF_8);
+        var currentTime = Unpooled.buffer(bytes.length).writeBytes(bytes);
+        var mpm = MqttMessageBuilders.publish()
+                .qos(MqttQoS.AT_MOST_ONCE)
+                .retained(false)
+                .topicName(sysTopic)
+                .payload(currentTime)
+                .build();
+
+        channel.writeAndFlush(mpm.retain());
+        return Mono.empty();
     }
 
     /**
@@ -161,10 +161,30 @@ public class SysMessageServiceImpl implements ISysMessageService {
         if (!enableSysBridge) {
             return;
         }
-        kafkaTemplate.send(kafkaBridgeTopic, serializer.serialize(msg));
+        kafkaTemplate.send(kafkaBridgeTopic, JSON.writeValueAsBytes(msg));
     }
 
-    private String key(ClientConnOrDiscMsg msg) {
-        return clientSysMsgPrefix + msg.getClientId() + "_" + msg.getType() + "_" + msg.getTimestamp();
+    @Override
+    public void action(byte[] msg) {
+        InternalMessage<SysMsg> im;
+        if (serializer instanceof JsonSerializer se) {
+            im = se.deserialize(msg, new TypeReference<>() {
+            });
+        } else {
+            //noinspection unchecked
+            im = serializer.deserialize(msg, InternalMessage.class);
+        }
+
+        SysMsg imMsg = im.getData();
+        if (Objects.isNull(imMsg)) {
+            return;
+        }
+
+        publish(imMsg.getClientId(), imMsg.getTopic(), imMsg.getTimestamp(), true).subscribe();
+    }
+
+    @Override
+    public boolean support(String channel) {
+        return SYS.equals(channel);
     }
 }

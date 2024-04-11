@@ -74,13 +74,16 @@ public class KafkaConfig {
     @Value("${spring.kafka.consumer.session-timeout-ms}")
     private Integer sessionTimeOut;
 
+    @Value("${spring.kafka.consumer.partition-assignment-strategy}")
+    private String partitionAssignmentStrategy;
+
     @Bean
     @Primary
     KafkaListenerContainerFactory<ConcurrentMessageListenerContainer<Integer, String>> kafkaListenerContainerFactory(MqttxConfig mqttxConfig) {
         ConcurrentKafkaListenerContainerFactory<Integer, String> factory = new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory(mqttxConfig));
         //设置并发量，小于或等于Topic的分区数,并且要在consumerFactory设置一次拉取的数量
-        factory.setConcurrency(3);
+        factory.setConcurrency(mqttxConfig.getKafka().getConcurrency());
         //设置拉取等待时间(也可间接的理解为延时消费)
         factory.getContainerProperties().setPollTimeout(3000);
         //指定使用此bean工厂的监听方法，消费确认为方式为用户指定aks,可以用下面的配置也可以直接使用enableAutoCommit参数
@@ -104,6 +107,7 @@ public class KafkaConfig {
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset);
         props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, maxPollRecords);
         props.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, sessionTimeOut);
+        props.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, partitionAssignmentStrategy);
         props.put(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG, 10 * 60 * 1000);
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);

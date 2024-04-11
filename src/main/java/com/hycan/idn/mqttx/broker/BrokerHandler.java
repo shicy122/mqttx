@@ -23,21 +23,24 @@ import com.hycan.idn.mqttx.broker.handler.MessageDelegatingHandler;
 import com.hycan.idn.mqttx.config.MqttxConfig;
 import com.hycan.idn.mqttx.consumer.Watcher;
 import com.hycan.idn.mqttx.exception.AuthorizationException;
+import com.hycan.idn.mqttx.graceful.MqttxHealthIndicator;
 import com.hycan.idn.mqttx.pojo.Authentication;
 import com.hycan.idn.mqttx.pojo.InternalMessage;
 import com.hycan.idn.mqttx.pojo.Session;
 import com.hycan.idn.mqttx.service.IAuthenticationService;
 import com.hycan.idn.mqttx.service.IInstanceRouterService;
 import com.hycan.idn.mqttx.service.ISessionService;
-import com.hycan.idn.mqttx.service.ISubscriptionService;
 import com.hycan.idn.mqttx.utils.JsonSerializer;
 import com.hycan.idn.mqttx.utils.Serializer;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.group.ChannelGroup;
 import io.netty.channel.group.DefaultChannelGroup;
+import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.mqtt.MqttConnAckMessage;
 import io.netty.handler.codec.mqtt.MqttConnectReturnCode;
 import io.netty.handler.codec.mqtt.MqttIdentifierRejectedException;
@@ -80,9 +83,9 @@ public class BrokerHandler extends SimpleChannelInboundHandler<MqttMessage> impl
     public static final long START_TIME = System.currentTimeMillis();
     private final MessageDelegatingHandler messageDelegatingHandler;
     private final DisconnectHandler disconnectHandler;
-    private final ISubscriptionService subscriptionService;
     private final IAuthenticationService authenticationService;
     private final IInstanceRouterService instanceRouterService;
+    private final MqttxHealthIndicator mqttxHealthIndicator;
 
     private final Serializer serializer;
     private final boolean enableSysTopic;
@@ -94,20 +97,20 @@ public class BrokerHandler extends SimpleChannelInboundHandler<MqttMessage> impl
                          MessageDelegatingHandler messageDelegatingHandler,
                          ISessionService sessionService,
                          DisconnectHandler disconnectHandler,
-                         ISubscriptionService subscriptionService,
                          IAuthenticationService authenticationService,
-                         IInstanceRouterService instanceRouterService, Serializer serializer) {
+                         IInstanceRouterService instanceRouterService,
+                         MqttxHealthIndicator mqttxHealthIndicator,
+                         Serializer serializer) {
         this.disconnectHandler = disconnectHandler;
         this.authenticationService = authenticationService;
         this.instanceRouterService = instanceRouterService;
+        this.mqttxHealthIndicator = mqttxHealthIndicator;
         Assert.notNull(messageDelegatingHandler, "messageDelegatingHandler can't be null");
         Assert.notNull(sessionService, "sessionService can't be null");
-        Assert.notNull(subscriptionService, "subscriptionService can't be null");
         Assert.notNull(serializer, "serializer can't be null");
 
         MqttxConfig.SysTopic sysTopic = config.getSysTopic();
         this.messageDelegatingHandler = messageDelegatingHandler;
-        this.subscriptionService = subscriptionService;
         this.serializer = serializer;
         this.enableSysTopic = sysTopic.getEnable();
         this.AUTHORIZED = config.getKafka().getAuthorized();
@@ -157,7 +160,7 @@ public class BrokerHandler extends SimpleChannelInboundHandler<MqttMessage> impl
 
         // 会话状态处理
         if (session != null) {
-            disconnectHandler.onClientDisconnected(session);
+            disconnectHandler.onClientDisconnected(session, ctx.channel());
             instanceRouterService.clearAdminClientConnect(session.getClientId()).subscribe();
             log.info("断开连接: 客户端ID=[{}], channel=[{}]", session.getClientId(), ctx.channel().id());
         }
@@ -165,13 +168,19 @@ public class BrokerHandler extends SimpleChannelInboundHandler<MqttMessage> impl
     }
 
     /**
-     * 异常处理及请求分发
+     * 请求分发
      *
      * @param ctx         {@link ChannelHandlerContext}
      * @param mqttMessage {@link MqttMessage}
      */
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, MqttMessage mqttMessage) {
+        if (!mqttxHealthIndicator.isHealth()) {
+            log.warn("拒绝处理: 服务当前为下线状态, channel=[{}]", ctx.channel().id());
+            ctx.close();
+            return;
+        }
+
         // 异常处理
         if (mqttMessage.decoderResult().isFailure()) {
             exceptionCaught(ctx, mqttMessage.decoderResult().cause());
@@ -217,13 +226,20 @@ public class BrokerHandler extends SimpleChannelInboundHandler<MqttMessage> impl
                 log.error("客户端权限异常=[{}], channel=[{}]", cause.getMessage(), ctx.channel().id());
             }
         } else if (cause instanceof IOException) {
-            // 连接被强制断开
             Session session = (Session) ctx.channel().attr(AttributeKey.valueOf(Session.KEY)).get();
             if (session != null) {
                 ConnectHandler.CLIENT_MAP.remove(session.getClientId());
                 log.warn("连接被强制断开: 客户端ID=[{}], channel=[{}]", session.getClientId(), ctx.channel().id());
             } else {
                 log.error("连接被强制断开: 异常=[{}], channel=[{}]", cause.getMessage(), ctx.channel().id());
+            }
+        } else if (cause instanceof DecoderException) {
+            Session session = (Session) ctx.channel().attr(AttributeKey.valueOf(Session.KEY)).get();
+            if (session != null) {
+                ConnectHandler.CLIENT_MAP.remove(session.getClientId());
+                log.warn("报文解码异常: 客户端ID=[{}], channel=[{}]", session.getClientId(), ctx.channel().id());
+            } else {
+                log.error("报文解码异常: 异常=[{}], channel=[{}]", cause.getMessage(), ctx.channel().id());
             }
         } else {
             Session session = (Session) ctx.channel().attr(AttributeKey.valueOf(Session.KEY)).get();
@@ -253,6 +269,7 @@ public class BrokerHandler extends SimpleChannelInboundHandler<MqttMessage> impl
         Session session = (Session) channel.attr(AttributeKey.valueOf(Session.KEY)).get();
         if (Objects.isNull(session)) {
             log.warn("Session is null, channel id is {}", channel.id());
+            ctx.close();
             return;
         }
         String clientId = session.getClientId();
@@ -260,6 +277,7 @@ public class BrokerHandler extends SimpleChannelInboundHandler<MqttMessage> impl
         InetSocketAddress socketAddress = (InetSocketAddress) channel.remoteAddress();
         if (Objects.isNull(socketAddress)) {
             log.warn("Socket address is null, channel id is {}", channel.id());
+            ctx.close();
             return;
         }
         String host = socketAddress.getAddress().getHostAddress();
@@ -267,10 +285,20 @@ public class BrokerHandler extends SimpleChannelInboundHandler<MqttMessage> impl
 
         if (evt instanceof IdleStateEvent ise) {
             if (IdleState.ALL_IDLE.equals(ise.state())) {
+                String channelId = channel.id().asShortText();
                 log.warn("心跳超时: 客户端ID=[{}], channel=[{}], R[{}:{}]", clientId, channel.id(), host, port);
-
                 // 关闭连接
-                ctx.close();
+                ChannelFuture channelFuture = ctx.close();
+                channelFuture.addListener((ChannelFutureListener) future -> {
+                    if (future.isSuccess()) {
+                        log.info("心跳超时: 关闭连接成功! 客户端ID=[{}], channel=[{}], R[{}:{}]", clientId, channelId, host, port);
+                    } else {
+                        log.info("心跳超时: 关闭连接失败! 客户端ID=[{}], channel=[{}], R[{}:{}], 原因=[{}]",
+                                clientId, channelId, host, port, future.cause().getMessage());
+                        ctx.close();
+                    }
+                });
+
             }
         } else if (evt instanceof SslHandshakeCompletionEvent shce) {
             // 监听 ssl 握手事件
@@ -310,11 +338,6 @@ public class BrokerHandler extends SimpleChannelInboundHandler<MqttMessage> impl
             return;
         }
         authenticationService.alterUserAuthorizedTopic(clientId, authorizedSub, authorizedPub);
-
-        // 移除 cache&redis 中客户端订阅的 topic
-        if (!CollectionUtils.isEmpty(authorizedSub)) {
-            subscriptionService.clearUnAuthorizedClientSub(clientId, authorizedSub).subscribe();
-        }
     }
 
     @Override

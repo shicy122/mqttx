@@ -64,7 +64,7 @@ public class SubscribeHandler extends AbstractMqttTopicSecureHandler {
     private final IRetainMessageService retainMessageService;
     private final ISubscriptionService subscriptionService;
     private final PublishHandler publishHandler;
-    private final boolean enableSysTopic, enableLog;
+    private final boolean enableSysTopic;
     private final String version;
     private final String brokerId;
     private long interval;
@@ -80,7 +80,6 @@ public class SubscribeHandler extends AbstractMqttTopicSecureHandler {
         this.publishHandler = publishHandler;
         this.subscriptionService = subscriptionService;
         this.enableTopicPubSubSecure = config.getFilterTopic().getEnableTopicSubPubSecure();
-        this.enableLog = config.getSysConfig().getEnableLog();
 
         this.version = config.getVersion();
         this.enableSysTopic = config.getSysTopic().getEnable();
@@ -116,7 +115,6 @@ public class SubscribeHandler extends AbstractMqttTopicSecureHandler {
         mqttTopicSubscriptions.forEach(mqttTopicSubscription -> {
             final String topic = mqttTopicSubscription.topicName();
             int qos = mqttTopicSubscription.qualityOfService().value();
-            boolean isSubSuccess = false;
 
             if (!TopicUtils.isValid(topic)) {
                 // Failure
@@ -133,9 +131,8 @@ public class SubscribeHandler extends AbstractMqttTopicSecureHandler {
                         if (!TopicUtils.isSysEvent(topic)) {
                             needPubSysMsg.add(clientSub);
                         } else {
-                            subscriptionService.subscribeSys(clientSub, false).subscribe();
+                            subscriptionService.subscribeSys(clientSub, true).subscribe();
                         }
-                        isSubSuccess = true;
                     } else {
                         // 区分开系统主题与普通主题
                         if (TopicUtils.isSys(topic)) {
@@ -143,16 +140,11 @@ public class SubscribeHandler extends AbstractMqttTopicSecureHandler {
                         } else {
                             ClientSub clientSub = ClientSub.of(clientId, qos, topic, isCleanSession(ctx));
                             subscriptionService.subscribe(clientSub).subscribe();
-                            isSubSuccess = true;
                         }
                     }
                 }
             }
             grantedQosLevels.add(qos);
-
-            if (Boolean.TRUE.equals(enableLog)) {
-                log.info("订阅{}: 客户端ID=[{}], Topic=[{}]", isSubSuccess ? "成功" : "失败", clientId, topic);
-            }
         });
 
         // acknowledge

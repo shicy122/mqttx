@@ -58,7 +58,10 @@
   <!--  <logger name="org.springframework.data.mongodb.core" level="DEBUG"/>-->
 
   <!--nacos 心跳 INFO 屏蔽-->
-  <logger name="com.alibaba.nacos" level="OFF" addtivity="false"></logger>
+  <logger name="com.alibaba.nacos" level="ERROR">
+    <appender-ref ref="console"/>
+    <appender-ref ref="error"/>
+  </logger>
   <logger name="org.mongodb.driver.connection" level="OFF" addtivity="false"></logger>
   <!-- Level: FATAL 0  ERROR 3  WARN 4  INFO 6  DEBUG 7 -->
   <root level="INFO">

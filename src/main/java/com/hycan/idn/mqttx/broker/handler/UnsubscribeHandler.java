@@ -36,14 +36,13 @@ import java.util.List;
 @Handler(type = MqttMessageType.UNSUBSCRIBE)
 public class UnsubscribeHandler extends AbstractMqttSessionHandler {
 
-    private final Boolean enableSysTopic, enableLog;
+    private final Boolean enableSysTopic;
     private final ISubscriptionService subscriptionService;
 
     public UnsubscribeHandler(MqttxConfig config, ISubscriptionService subscriptionService) {
         super(config.getCluster().getEnable());
         this.enableSysTopic = config.getSysTopic().getEnable();
         this.subscriptionService = subscriptionService;
-        this.enableLog = config.getSysConfig().getEnableLog();
     }
 
     @Override
@@ -54,14 +53,10 @@ public class UnsubscribeHandler extends AbstractMqttSessionHandler {
 
         // 主题列表
         List<String> collect = new ArrayList<>(payload.topics());
-        if (Boolean.TRUE.equals(enableLog)) {
-            log.info("取消订阅: 客户端ID=[{}], Topic列表={}", clientId(ctx), collect);
-        }
-
         if (Boolean.TRUE.equals(enableSysTopic)) {
             List<String> unSubSysTopics = collect.stream().filter(TopicUtils::isSys).toList();
             collect.removeAll(unSubSysTopics);
-            Mono.when(unsubscribeSysTopics(unSubSysTopics, ctx), subscriptionService.unsubscribe(clientId(ctx), isCleanSession(ctx), collect))
+            Mono.when(unsubscribeSysTopics(unSubSysTopics, ctx), subscriptionService.unsubscribe(clientId(ctx), isCleanSession(ctx), collect, true))
                     .doOnSuccess(unused -> {
                         // response
                         MqttMessage mqttMessage = MqttMessageFactory.newMessage(
@@ -74,7 +69,7 @@ public class UnsubscribeHandler extends AbstractMqttSessionHandler {
             return;
         }
 
-        subscriptionService.unsubscribe(clientId(ctx), isCleanSession(ctx), collect)
+        subscriptionService.unsubscribe(clientId(ctx), isCleanSession(ctx), collect, true)
                 .doOnSuccess(unused -> {
                     // response
                     MqttMessage mqttMessage = MqttMessageFactory.newMessage(

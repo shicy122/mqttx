@@ -16,18 +16,21 @@
 
 package com.hycan.idn.mqttx.broker.handler;
 
+import com.hycan.idn.mqttx.broker.BrokerHandler;
 import com.hycan.idn.mqttx.pojo.Session;
 import com.hycan.idn.mqttx.exception.AuthorizationException;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.mqtt.MqttMessage;
 import io.netty.handler.codec.mqtt.MqttMessageType;
 import io.netty.util.AttributeKey;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.util.Assert;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -36,6 +39,7 @@ import java.util.Optional;
  * @author Shadow
  * @since 2.0.1
  */
+@Slf4j
 @Component
 public class MessageDelegatingHandler {
 
@@ -84,11 +88,22 @@ public class MessageDelegatingHandler {
      */
     public void handle(ChannelHandlerContext ctx, MqttMessage mqttMessage) {
         MqttMessageType mqttMessageType = mqttMessage.fixedHeader().messageType();
+        Session session = (Session) ctx.channel().attr(AttributeKey.valueOf(Session.KEY)).get();
 
         // 连接校验
-        if (mqttMessageType != MqttMessageType.CONNECT &&
-                ctx.channel().attr(AttributeKey.valueOf(Session.KEY)).get() == null) {
-            throw new AuthorizationException("access denied");
+        if (mqttMessageType != MqttMessageType.CONNECT) {
+            if (session == null) {
+                throw new AuthorizationException("session is null, access denied!");
+            }
+
+            final var channel = Optional.of(session.getClientId())
+                    .map(ConnectHandler.CLIENT_MAP::get)
+                    .map(BrokerHandler.CHANNELS::find)
+                    .orElse(null);
+            if (Objects.isNull(channel) || !channel.id().asShortText().equals(ctx.channel().id().asShortText())) {
+                log.warn("旧连接未释放, 尝试重新断开, channel=[{}]", ctx.channel());
+                ctx.close();
+            }
         }
 
         Optional.of(handlerMap.get(mqttMessageType))

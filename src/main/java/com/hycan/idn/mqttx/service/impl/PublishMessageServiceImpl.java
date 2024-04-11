@@ -60,7 +60,7 @@ public class PublishMessageServiceImpl implements IPublishMessageService {
     private final String payloadLogType;
     private final boolean enableTopicSubPubSecure, enableLog;
 
-    public final ConcurrentMap<String, ConcurrentHashMap<Integer, PubMsg>> outer = new ConcurrentHashMap<>(500);
+    private final ConcurrentMap<String, ConcurrentHashMap<Integer, PubMsg>> outer = new ConcurrentHashMap<>(500);
 
     public PublishMessageServiceImpl(MqttxConfig mqttxConfig,
                                      ReactiveMongoTemplate mongoTemplate,
@@ -82,8 +82,7 @@ public class PublishMessageServiceImpl implements IPublishMessageService {
     @Override
     public Mono<Void> save2Db(String clientId, PubMsg pubMsg) {
         int messageId = pubMsg.getMessageId();
-        pubMsg.setClientId(clientId);
-        outer.computeIfAbsent(clientId, s -> new ConcurrentHashMap<>(100)).putIfAbsent(messageId, pubMsg);
+        outer.computeIfAbsent(clientId, s -> new ConcurrentHashMap<>(100)).putIfAbsent(messageId, PubMsg.of(pubMsg, clientId));
         offlineMsgDelayQueueExecutor.addQueue(OfflineMsgDelay.of(clientId, messageId));
         return Mono.empty();
     }
@@ -159,6 +158,12 @@ public class PublishMessageServiceImpl implements IPublishMessageService {
      */
     @Override
     public Mono<Void> republish(PubMsg pubMsg) {
+        final var clientId = pubMsg.getClientId();
+        final var topic = pubMsg.getTopic();
+        final var qos = pubMsg.getQos();
+        final var messageId = pubMsg.getMessageId();
+        final var payload = pubMsg.getPayload();
+
         final var channel = Optional.of(pubMsg.getClientId())
                 .map(ConnectHandler.CLIENT_MAP::get)
                 .map(BrokerHandler.CHANNELS::find)
@@ -168,8 +173,7 @@ public class PublishMessageServiceImpl implements IPublishMessageService {
         }
 
         return Mono.fromRunnable(() -> {
-            final var topic = pubMsg.getTopic();
-            final var qos = pubMsg.getQos();
+
             // 订阅权限判定
             if (enableTopicSubPubSecure && !TopicUtils.hasAuthToSubTopic(channel, topic)) {
                 return;
@@ -180,26 +184,26 @@ public class PublishMessageServiceImpl implements IPublishMessageService {
             // The DUP flag MUST be set to 0 for all QoS 0 messages [MQTT-3.3.1-2].
             final var dupFlag = qos != MqttQoS.AT_MOST_ONCE.value();
             final var mqttMessage = MqttMessageFactory.newMessage(
-                    new MqttFixedHeader(MqttMessageType.PUBLISH, dupFlag, MqttQoS.valueOf(pubMsg.getQos()),
+                    new MqttFixedHeader(MqttMessageType.PUBLISH, dupFlag, MqttQoS.valueOf(qos),
                             false, 0),
-                    new MqttPublishVariableHeader(topic, pubMsg.getMessageId()),
+                    new MqttPublishVariableHeader(topic, messageId),
                     // 这是一个浅拷贝，任何对pubMsg中payload的修改都会反馈到wrappedBuffer
-                    Unpooled.wrappedBuffer(pubMsg.getPayload())
+                    Unpooled.wrappedBuffer(payload)
             );
 
             if (Boolean.TRUE.equals(enableLog)) {
                 log.info("补发消息: 客户端ID=[{}], Topic=[{}], QoS=[{}], PacketId=[{}], Payload=[{}]",
-                        pubMsg.getClientId(), topic, qos, pubMsg.getMessageId(), PAYLOAD_LOG_TYPE_HEX.equals(payloadLogType) ?
-                                BytesUtil.bytesToHexString(pubMsg.getPayload()) : new String(pubMsg.getPayload(), StandardCharsets.UTF_8));
+                        clientId, topic, qos, messageId, PAYLOAD_LOG_TYPE_HEX.equals(payloadLogType) ?
+                                BytesUtil.bytesToHexString(payload) : new String(payload, StandardCharsets.UTF_8));
             }
             channel.writeAndFlush(mqttMessage);
         })
-        .thenMany(pubRelMessageService.searchOut(pubMsg.getClientId()))
-        .doOnNext(messageId -> {
+        .thenMany(pubRelMessageService.searchOut(clientId))
+        .doOnNext(msgId -> {
             var mqttMessage = MqttMessageFactory.newMessage(
                     // pubRel 的 fixHeader 是固定死了的 [0,1,1,0,0,0,1,0]
                     new MqttFixedHeader(MqttMessageType.PUBREL, false, MqttQoS.AT_LEAST_ONCE, false, 0),
-                    MqttMessageIdVariableHeader.from(messageId),
+                    MqttMessageIdVariableHeader.from(msgId),
                     null
             );
 

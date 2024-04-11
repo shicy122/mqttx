@@ -32,6 +32,11 @@ import java.util.List;
 @Data
 public class ClientSubOrUnsubMsg {
 
+    /**
+     * 按顺序 -> 订阅，解除订阅
+     */
+    public static final int SUB = 1, UN_SUB = 2;
+
     private String clientId;
 
     private int qos;
@@ -55,6 +60,17 @@ public class ClientSubOrUnsubMsg {
      * </ol>
      */
     private int type;
+
+    public static ClientSubOrUnsubMsg of(ClientSub clientSub, boolean isSysTopic, int type) {
+        ClientSubOrUnsubMsg msg = new ClientSubOrUnsubMsg();
+        msg.setClientId(clientSub.getClientId());
+        msg.setQos(clientSub.getQos());
+        msg.setTopic(clientSub.getTopic());
+        msg.setCleanSession(clientSub.isCleanSession());
+        msg.setSysTopic(isSysTopic);
+        msg.setType(type);
+        return msg;
+    }
 
     public static ClientSubOrUnsubMsg of(String clientId, int qos, String topic, boolean cleanSession, boolean isSysTopic, int type) {
         ClientSubOrUnsubMsg msg = new ClientSubOrUnsubMsg();

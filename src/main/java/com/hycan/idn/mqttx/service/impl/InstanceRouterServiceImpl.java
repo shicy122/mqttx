@@ -1,17 +1,11 @@
 package com.hycan.idn.mqttx.service.impl;
 
-import com.alibaba.cloud.nacos.NacosDiscoveryProperties;
-import com.alibaba.cloud.nacos.NacosServiceManager;
-import com.alibaba.nacos.api.exception.NacosException;
-import com.alibaba.nacos.api.naming.NamingService;
-import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.hycan.idn.mqttx.broker.BrokerHandler;
 import com.hycan.idn.mqttx.broker.handler.ConnectHandler;
 import com.hycan.idn.mqttx.config.MqttxConfig;
 import com.hycan.idn.mqttx.exception.AuthenticationException;
 import com.hycan.idn.mqttx.pojo.AdminClient;
 import com.hycan.idn.mqttx.service.IInstanceRouterService;
-import com.hycan.idn.mqttx.utils.ExceptionUtil;
 import io.netty.channel.ChannelOutboundInvoker;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
@@ -22,7 +16,6 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -31,6 +24,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
+import static com.hycan.idn.mqttx.graceful.InstanceChangeListener.ACTIVE_INSTANCE_SET;
 import static java.lang.String.format;
 
 /**
@@ -43,20 +37,14 @@ public class InstanceRouterServiceImpl implements IInstanceRouterService {
     private static final int REBALANCED_SIZE = 2;
 
     private final ReactiveStringRedisTemplate stringRedisTemplate;
-    private final NacosServiceManager nacosServiceManager;
-    private final NacosDiscoveryProperties nacosDiscoveryProperties;
 
     private final String adminConnHashPrefix, currentInstanceId;
 
     private final List<String> adminClientIdPrefix;
 
     public InstanceRouterServiceImpl(ReactiveStringRedisTemplate stringRedisTemplate,
-                                     NacosServiceManager nacosServiceManager,
-                                     NacosDiscoveryProperties nacosDiscoveryProperties,
                                      MqttxConfig config) {
         this.stringRedisTemplate = stringRedisTemplate;
-        this.nacosServiceManager = nacosServiceManager;
-        this.nacosDiscoveryProperties = nacosDiscoveryProperties;
 
         this.currentInstanceId = config.getInstanceId();
 
@@ -71,9 +59,9 @@ public class InstanceRouterServiceImpl implements IInstanceRouterService {
     /**
      * 自动均衡管理员客户端定时器
      */
-    @Scheduled(initialDelay = 30, fixedDelay = 60, timeUnit = TimeUnit.SECONDS)
+    @Scheduled(initialDelay = 10, fixedDelay = 60, timeUnit = TimeUnit.SECONDS)
     private void autoRebalancedAdminClientConnect() {
-        if (getActiveInstances().size() < REBALANCED_SIZE) {
+        if (ACTIVE_INSTANCE_SET.size() < REBALANCED_SIZE) {
             return;
         }
 
@@ -82,7 +70,9 @@ public class InstanceRouterServiceImpl implements IInstanceRouterService {
                 .collectList()
                 .publishOn(Schedulers.boundedElastic())
                 .doOnNext(adminClients -> {
+                    log.debug("自动均衡管理员客户端定时器开始执行, 管理员客户端列表={}, 管理员客户端ID前缀列表={}", adminClients, adminClientIdPrefix);
                     for (String prefix : adminClientIdPrefix) {
+                        // key:instanceId  value:adminClientId
                         Map<String, List<String>> adminClientMap = convertAdminClientMapByPrefix(adminClients, prefix);
                         if (CollectionUtils.isEmpty(adminClientMap)) {
                             continue;
@@ -93,17 +83,19 @@ public class InstanceRouterServiceImpl implements IInstanceRouterService {
                             continue;
                         }
 
-                        int minConnectClientSize = 0;
-                        Optional<Map.Entry<String, List<String>>> minEntryOptional = adminClientMap.entrySet().stream()
+                        // 获取管理员客户端集合中，连接数最少的一个节点，对应管理员客户端连接的数量
+                        int minConnectClientSize = adminClientMap.entrySet().stream()
                                 .filter(entry -> !Objects.equals(entry.getKey(), currentInstanceId))
-                                .min(Comparator.comparingInt(entry -> entry.getValue().size()));
-                        if (minEntryOptional.isPresent()) {
-                            minConnectClientSize = minEntryOptional.get().getValue().size();
-                        }
+                                .min(Comparator.comparingInt(entry -> entry.getValue().size()))
+                                .map(entry -> entry.getValue().size()).orElse(0);
 
                         if ((currentConnectClientList.size() - minConnectClientSize) < REBALANCED_SIZE) {
                             continue;
                         }
+                        log.debug("自动均衡管理员客户端定时器进行中, 客户端ID前缀=[{}], 当前实例ID=[{}], " +
+                                        "按前缀转换后的实例ID与管理员客户端ID列表对应关系={}, " +
+                                        "管理员客户端连接数最少的实例对应的连接数量={}",
+                                prefix, currentInstanceId, adminClientMap, minConnectClientSize);
 
                         for (int index = 0; index < (currentConnectClientList.size() - minConnectClientSize - 1); index++) {
                             String clientId = currentConnectClientList.get(index);
@@ -115,11 +107,13 @@ public class InstanceRouterServiceImpl implements IInstanceRouterService {
                                     .doOnSuccess(unused -> Optional.ofNullable(clientId)
                                             .map(ConnectHandler.CLIENT_MAP::get)
                                             .map(BrokerHandler.CHANNELS::find)
-                                            .map(ChannelOutboundInvoker::close))
+                                            .ifPresent(ChannelOutboundInvoker::close))
                                     .subscribe();
-                            log.info("强制断开: 管理员客户端ID=[{}]需要重平衡到其他MQTTX节点!", clientId);
+
+                            log.info("强制断开: 管理员客户端ID=[{}]需要负载均衡到其他MQTTX节点!", clientId);
                         }
                     }
+                    log.debug("自动均衡管理员客户端定时器结束执行, 管理员客户端列表={}, 管理员客户端ID前缀={}", adminClients, adminClientIdPrefix);
                 }).subscribe();
     }
 
@@ -131,7 +125,7 @@ public class InstanceRouterServiceImpl implements IInstanceRouterService {
      */
     @Override
     public Mono<Boolean> adminClientConnectRouter(String clientId) {
-        if (getActiveInstances().size() < REBALANCED_SIZE) {
+        if (ACTIVE_INSTANCE_SET.size() < REBALANCED_SIZE) {
             return Mono.just(Boolean.TRUE);
         }
 
@@ -145,6 +139,8 @@ public class InstanceRouterServiceImpl implements IInstanceRouterService {
                     int currentAdminClientSize = ConnectHandler.CLIENT_MAP.entrySet().stream()
                             .filter(entry -> entry.getKey().startsWith(clientIdPrefix))
                             .toList().size();
+                    log.info("管理员客户端连接路由策略: Redis缓存中的管理员客户端列表={}, 当前节点管理员客户端连接数量=[{}]",
+                            adminClients, currentAdminClientSize);
                     return isAdminClientConnectAccess(adminClientMap, currentAdminClientSize);
                 });
     }
@@ -158,6 +154,7 @@ public class InstanceRouterServiceImpl implements IInstanceRouterService {
     public Mono<Void> clearAdminClientConnect(String clientId) {
         Optional<String> clientIdPrefixOptional = adminClientIdPrefix.stream().filter(clientId::startsWith).findFirst();
         if (clientIdPrefixOptional.isPresent()) {
+            log.info("清理Redis缓存中的管理员客户端连接信息: 客户端ID=[{}]", clientId);
             return stringRedisTemplate.opsForHash().remove(adminConnHashPrefix, clientId).then();
         }
         return Mono.empty();
@@ -182,7 +179,7 @@ public class InstanceRouterServiceImpl implements IInstanceRouterService {
      *
      * @param adminClients   redis中获取到的admin客户端列表
      * @param clientIdPrefix 客户端ID前缀
-     * @return 按hostName和clientIds转换后的map结构
+     * @return 按instanceId和clientIds转换后的map结构
      */
     private Map<String, List<String>> convertAdminClientMapByPrefix(List<AdminClient> adminClients, String clientIdPrefix) {
         Map<String, List<String>> adminClientMap = new HashMap<>();
@@ -196,6 +193,7 @@ public class InstanceRouterServiceImpl implements IInstanceRouterService {
 
             // 将未与任何节点建立连接的admin客户端ID从redis删除
             if (!ConnectHandler.ALL_CLIENT_MAP.containsKey(clientId)) {
+                log.info("从Redis清除未与任何节点建立连接的管理员客户端: 客户端ID=[{}]", clientId);
                 stringRedisTemplate.opsForHash().remove(adminConnHashPrefix, clientId).subscribe();
                 continue;
             }
@@ -225,8 +223,7 @@ public class InstanceRouterServiceImpl implements IInstanceRouterService {
             return true;
         }
 
-        List<String> instanceIds = getActiveInstances().stream().map(Instance::getInstanceId).toList();
-        if (instanceIds.stream().anyMatch(instanceId -> !adminClientMap.containsKey(instanceId))) {
+        if (ACTIVE_INSTANCE_SET.stream().anyMatch(instanceId -> !adminClientMap.containsKey(instanceId))) {
             return false;
         }
 
@@ -242,29 +239,5 @@ public class InstanceRouterServiceImpl implements IInstanceRouterService {
         return adminClientMap.values().stream()
                 .filter(strings -> strings.size() == currentAdminClientSize)
                 .anyMatch(list -> true);
-    }
-
-    /**
-     * 从Nacos中获取活跃的mqttx节点数量
-     * @return
-     */
-    private List<Instance> getActiveInstances() {
-        try {
-            NamingService namingService = nacosServiceManager.getNamingService(nacosDiscoveryProperties.getNacosProperties());
-            List<Instance> instanceList = namingService.getAllInstances(
-                    nacosDiscoveryProperties.getService(), nacosDiscoveryProperties.getGroup(),
-                    Collections.singletonList(nacosDiscoveryProperties.getClusterName()));
-            if (CollectionUtils.isEmpty(instanceList)) {
-                log.warn("获取MQTTX实例数: Nacos地址=[{}], 命名空间ID=[{}], 分组名称=[{}], 服务名=[{}], 实例数=[{}]",
-                        nacosDiscoveryProperties.getNacosProperties().getProperty("serverAddr"),
-                        nacosDiscoveryProperties.getNacosProperties().getProperty("namespace"),
-                        nacosDiscoveryProperties.getNacosProperties().getProperty("group"),
-                        nacosDiscoveryProperties.getService(), instanceList.size());
-            }
-            return instanceList;
-        } catch (NacosException ne) {
-            log.error("获取MQTTX实例数量异常, 异常详情=[{}]", ExceptionUtil.getBriefStackTrace(ne));
-            return new ArrayList<>();
-        }
     }
 }

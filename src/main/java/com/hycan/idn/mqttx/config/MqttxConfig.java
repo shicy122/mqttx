@@ -17,6 +17,7 @@
 package com.hycan.idn.mqttx.config;
 
 import com.alibaba.cloud.nacos.NacosDiscoveryProperties;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.hycan.idn.mqttx.broker.handler.PublishHandler;
 import com.hycan.idn.mqttx.constants.SerializeStrategy;
 import com.hycan.idn.mqttx.constants.ShareStrategyEnum;
@@ -32,12 +33,7 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.Resource;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 
 /**
  * 业务配置.
@@ -52,9 +48,11 @@ import java.util.UUID;
 @ConfigurationProperties(prefix = "mqttx")
 public class MqttxConfig {
 
+    @JsonIgnore
     @Resource
     private NacosDiscoveryProperties nacosDiscoveryProperties;
 
+    @JsonIgnore
     @Resource
     private ServerProperties serverProperties;
 
@@ -68,12 +66,15 @@ public class MqttxConfig {
     private String version = "unknown";
 
     /** broker id。区分集群内不同的 broker（如果集群功能开启）。默认对UUID hash后取模 */
-    private String brokerId = UUID.randomUUID().toString();
+    private String brokerId = IPUtils.getHostName();
 
     private String instanceId;
 
-    /** 心跳, 默认 60S;如果 客户端通过 conn 设置了心跳周期，则对应的 channel 心跳为指定周期 */
+    /** 心跳, 默认 60S; 如果 客户端通过 conn 设置了心跳周期，则对应的 channel 心跳为指定周期 */
     private Duration heartbeat = Duration.ofMinutes(1);
+
+    /** keepalive 系数, 默认 1.5 倍, 支持的范围为 (0, 3] */
+    private Double keepaliveRatio = 1.5D;
 
     /** ip */
     private String host = "0.0.0.0";
@@ -105,11 +106,12 @@ public class MqttxConfig {
     private int maxClientIdLength = MqttConstant.DEFAULT_MAX_CLIENT_ID_LENGTH;
 
     public String getInstanceId() {
-        return IPUtils.getHostIp() + "#" +
+        instanceId = IPUtils.getHostIp() + "#" +
                 serverProperties.getPort() + "#" +
                 nacosDiscoveryProperties.getClusterName() + "#" +
                 nacosDiscoveryProperties.getGroup() + "@@" +
                 nacosDiscoveryProperties.getService();
+        return instanceId;
     }
 
     /*--------------------------------------------
@@ -157,9 +159,6 @@ public class MqttxConfig {
         /** 非 cleanSession client messageId 前缀 */
         private String messageIdIncPrefix = "mqttx:client:messageid:";
 
-        /** 客户端上下线事件 */
-        private String clientSysMsgPrefix = "mqttx:client:sysmsg:";
-
         /** 内部 client 账号临时加密秘钥前缀 */
         private String adminKeyStrPrefix = "mqttx:client:admin:key:";
 
@@ -175,6 +174,8 @@ public class MqttxConfig {
     public static class Kafka {
 
         private String groupIdPrefix = "mqttx";
+
+        private Integer concurrency = 11;
 
         private String sync = "mqttx-internal-sync";
 
@@ -195,6 +196,8 @@ public class MqttxConfig {
         private String authorized = "mqttx-internal-authorized";
 
         private String subOrUnsub = "mqttx-internal-suborunsub";
+
+        private String sys = "mqttx-internal-sys";
     }
 
     /**
@@ -270,6 +273,9 @@ public class MqttxConfig {
         /** topic 前缀 */
         private String topicPrefix;
 
+        /** topic 后缀 */
+        private String topicSuffix;
+
         /** 主题安全订阅开关，默认关 */
         private Boolean enableTopicSubPubSecure = false;
     }
@@ -295,7 +301,7 @@ public class MqttxConfig {
         /** 批量保存消息计数器, 建议 500 <= 配置值 < 1500 */
         private Integer batchSaveMsgCounter = 1000;
 
-        /** 批量补发离线消息数量, 默认：500条 */
+        /** 批量补发离线消息数量, 默认: 500条 */
         private Integer batchSendMsgSize = 500;
 
         /** 单节点TCP最大连接数, 默认不开启该限制条件 */
@@ -306,6 +312,12 @@ public class MqttxConfig {
 
         /** 是否开启业务日志打印 */
         private Boolean enableLog = false;
+
+        /** 是否开启payload日志打印 */
+        private Boolean enablePayloadLog = false;
+
+        /** 优雅启动时间, 默认30秒 */
+        private Integer gracefulStartTime = 30;
 
         /** MQTT payload 数据日志打印类型, 支持两种类型: text / hex */
         private String payloadLogType = "text";
@@ -407,5 +419,8 @@ public class MqttxConfig {
 
         /** 类似 readTimeout, 见 {@link java.net.http.HttpRequest#timeout()} */
         private Duration timeout = Duration.ofSeconds(5);
+
+        /** 客户端ID黑名单 */
+        private Set<String> clientBlackList = new HashSet<>();
     }
 }

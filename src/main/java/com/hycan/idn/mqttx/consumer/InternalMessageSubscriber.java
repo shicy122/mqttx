@@ -60,6 +60,7 @@ public class InternalMessageSubscriber extends AbstractInnerChannel implements
     @Override
     @KafkaListener(
             topics = {
+                    "#{@mqttxConfig.kafka.sys}",
                     "#{@mqttxConfig.kafka.sync}",
                     "#{@mqttxConfig.kafka.pub}",
                     "#{@mqttxConfig.kafka.pubAck}",
@@ -70,7 +71,7 @@ public class InternalMessageSubscriber extends AbstractInnerChannel implements
                     "#{@mqttxConfig.kafka.disconnect}",
                     "#{@mqttxConfig.kafka.authorized}",
                     "#{@mqttxConfig.kafka.subOrUnsub}"
-            })
+            }, concurrency = "#{@mqttxConfig.kafka.concurrency}")
     public void onMessage(@NonNull List<ConsumerRecord<String, byte[]>> consumerRecords, @NonNull Acknowledgment ack) {
         if (CollectionUtils.isEmpty(consumerRecords)) {
             return;

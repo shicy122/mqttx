@@ -5,6 +5,8 @@ import com.hycan.idn.mqttx.broker.BrokerHandler;
 import com.hycan.idn.mqttx.broker.handler.AbstractMqttSessionHandler;
 import com.hycan.idn.mqttx.broker.handler.ConnectHandler;
 import com.hycan.idn.mqttx.config.MqttxConfig;
+import com.hycan.idn.mqttx.constants.MongoConstants;
+import com.hycan.idn.mqttx.entity.MqttxUser;
 import com.hycan.idn.mqttx.exception.AuthenticationException;
 import com.hycan.idn.mqttx.pojo.Authentication;
 import com.hycan.idn.mqttx.pojo.ClientAuth;
@@ -13,9 +15,13 @@ import com.hycan.idn.mqttx.service.IInstanceRouterService;
 import com.hycan.idn.mqttx.utils.ExceptionUtil;
 import com.hycan.idn.mqttx.utils.JSON;
 import com.hycan.idn.mqttx.utils.R;
+import com.hycan.idn.mqttx.utils.TopicUtils;
 import io.netty.handler.codec.mqtt.MqttConnectReturnCode;
 import io.netty.util.AttributeKey;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.mongodb.core.ReactiveMongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -31,11 +37,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 
 import static java.lang.String.format;
@@ -58,6 +60,7 @@ public class AuthenticationServiceImpl implements IAuthenticationService {
     private static final String HTTP = "http";
 
     private final HttpClient httpClient;
+    private final ReactiveMongoTemplate mongoTemplate;
     private final ReactiveStringRedisTemplate stringRedisTemplate;
     private final IInstanceRouterService instanceRouterService;
     private final String adminKeyStrPrefix, adminConnHashPrefix, instanceId;
@@ -70,16 +73,19 @@ public class AuthenticationServiceImpl implements IAuthenticationService {
     /**
      * 创建一个新的实例
      *
-     * @param config                   配置项
-     * @param httpClient               {@link HttpClient}
-     *                                 //@param redisTemplate
+     * @param config                配置项
+     * @param httpClient            {@link HttpClient}
+     *                              //@param redisTemplate
+     * @param mongoTemplate
      * @param stringRedisTemplate
      * @param instanceRouterService
      */
     public AuthenticationServiceImpl(MqttxConfig config,
                                      HttpClient httpClient,
+                                     ReactiveMongoTemplate mongoTemplate,
                                      ReactiveStringRedisTemplate stringRedisTemplate,
                                      IInstanceRouterService instanceRouterService) {
+        this.mongoTemplate = mongoTemplate;
         this.stringRedisTemplate = stringRedisTemplate;
         this.instanceRouterService = instanceRouterService;
 
@@ -123,9 +129,24 @@ public class AuthenticationServiceImpl implements IAuthenticationService {
         if (Boolean.TRUE.equals(enableLog)) {
             log.info("开始鉴权: 客户端ID=[{}], 用户名=[{}], 密码=[{}]", authDTO.getClientId(), authDTO.getUsername(), authDTO.getPassword());
         }
+        String url = getUrl(authDTO.getClientId());
+        if (!StringUtils.hasText(url)) {
+            Query query = Query.query(Criteria.where(MongoConstants.USER_NAME).is(authDTO.getUsername()));
+            mongoTemplate.findOne(query, MqttxUser.class)
+                    .doOnSuccess(user -> {
+                        if (Objects.isNull(user) || !authDTO.getPassword().equals(user.getPassword())) {
+                            throw new AuthenticationException(format("鉴权失败: 用户名或密码错误, 客户端ID=[%s]", authDTO.getClientId()));
+                        }
+                    })
+                    .doOnError(t -> log.error(t.getMessage(), t))
+                    .block();
+            return CompletableFuture.completedFuture(Authentication.of(authDTO.getClientId(),
+                    Collections.singletonList(TopicUtils.ALL_TOPIC),
+                    Collections.singletonList(TopicUtils.ALL_TOPIC)));
+        }
 
         var httpRequest = HttpRequest.newBuilder()
-                .uri(URI.create(getUrl(authDTO.getClientId())))
+                .uri(URI.create(url))
                 .timeout(timeout)
                 .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(authDTO)))
@@ -151,11 +172,7 @@ public class AuthenticationServiceImpl implements IAuthenticationService {
                 .map(Map.Entry::getValue)
                 .findAny();
 
-        if (urlOptional.isPresent()) {
-            return urlOptional.get();
-        }
-        throw new AuthenticationException(format("鉴权失败: 不支持的客户端ID前缀, 客户端ID=[%s]", clientId));
-
+        return urlOptional.orElse(null);
     }
 
     /**
@@ -208,7 +225,7 @@ public class AuthenticationServiceImpl implements IAuthenticationService {
                     if (Boolean.TRUE.equals(result)) {
                         return validAdminClientAuth(authDTO);
                     }
-                    log.warn("拒绝连接: 管理员客户端ID=[{}]需要重平衡到其他MQTTX节点!", authDTO.getClientId());
+                    log.warn("拒绝连接: 管理员客户端ID=[{}]需要负载均衡到其他MQTTX节点!", authDTO.getClientId());
                     return Mono.just(MqttConnectReturnCode.CONNECTION_REFUSED_USE_ANOTHER_SERVER);
                 });
     }

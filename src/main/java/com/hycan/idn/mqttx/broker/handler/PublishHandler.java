@@ -34,6 +34,7 @@ import com.hycan.idn.mqttx.service.ISessionService;
 import com.hycan.idn.mqttx.service.ISubscriptionService;
 import com.hycan.idn.mqttx.utils.BoundedExecutor;
 import com.hycan.idn.mqttx.utils.BytesUtil;
+import com.hycan.idn.mqttx.utils.JSON;
 import com.hycan.idn.mqttx.utils.JsonSerializer;
 import com.hycan.idn.mqttx.utils.RateLimiter;
 import com.hycan.idn.mqttx.utils.Serializer;
@@ -91,7 +92,7 @@ public class PublishHandler extends AbstractMqttTopicSecureHandler implements Wa
     private final IInternalMessageService internalMessageService;
     private final String brokerId, PUBLISH, payloadLogType;
     private final boolean enableTopicSubPubSecure, enableShareTopic, enableRateLimiter,
-            ignoreClientSelfPub, enableBizBridge, enableLog;
+            ignoreClientSelfPub, enableBizBridge, enableLog, enablePayloadLog;
     /**
      * 主题限流器
      */
@@ -162,6 +163,7 @@ public class PublishHandler extends AbstractMqttTopicSecureHandler implements Wa
         Assert.notNull(internalMessageService, "internalMessageService can't be null");
 
         this.enableLog = config.getSysConfig().getEnableLog();
+        this.enablePayloadLog = config.getSysConfig().getEnablePayloadLog();
         this.payloadLogType = config.getSysConfig().getPayloadLogType();
 
         ExecutorService executorService = ThreadPoolUtil.newThreadPoolExecutor(
@@ -192,21 +194,25 @@ public class PublishHandler extends AbstractMqttTopicSecureHandler implements Wa
         payload.readBytes(data);
 
         if (Boolean.TRUE.equals(enableLog)) {
+            if (enablePayloadLog) {
                 log.info("接收消息: 客户端ID=[{}], Topic=[{}], QoS=[{}], PacketId=[{}], Payload=[{}]",
                         clientId(ctx), topic, qos, packetId, PAYLOAD_LOG_TYPE_HEX.equals(payloadLogType) ?
                                 BytesUtil.bytesToHexString(data) : new String(data, StandardCharsets.UTF_8));
+            } else {
+                log.info("接收消息: 客户端ID=[{}], Topic=[{}], QoS=[{}], PacketId=[{}]", clientId(ctx), topic, qos, packetId);
+            }
         }
 
         // 发布权限判定
         if (enableTopicSubPubSecure && !hasAuthToPubTopic(ctx, topic)) {
-            throw new AuthorizationException("无对应 topic 发布权限");
+            throw new AuthorizationException("无对应 topic=[" + topic + "] 发布权限");
         }
 
         // 消息桥接 kafka
         if (Boolean.TRUE.equals(enableBizBridge)) {
             boundedExecutor.submitTask(() -> {
                 if (MQTT_TOPIC_PATTERN.matcher(topic).matches()) {
-                    kafkaTemplate.send(kafkaBridgeTopic, serializer.serialize(BridgeMsg.of(topic, data)));
+                    kafkaTemplate.send(kafkaBridgeTopic, JSON.writeValueAsBytes(BridgeMsg.of(topic, data)));
                 }
             });
         }
@@ -418,11 +424,23 @@ public class PublishHandler extends AbstractMqttTopicSecureHandler implements Wa
 
         // 1. channel == null && cleanSession
         if (channel == null && isCleanSession) {
+            log.warn("未发消息: 客户端ID=[{}]对应的channel不存在, cleanSession=[true], Topic=[{}], QoS=[{}], Payload=[{}], 连接当前节点=[{}], 缓存连接关系=[{}]",
+                    clientId, topic, qos, PAYLOAD_LOG_TYPE_HEX.equals(payloadLogType) ?
+                            BytesUtil.bytesToHexString(payload) : new String(payload, StandardCharsets.UTF_8),
+                    ConnectHandler.CLIENT_MAP.containsKey(clientId),
+                    ConnectHandler.ALL_CLIENT_MAP.containsKey(clientId));
+
             return Mono.empty();
         }
 
         // 2. channel == null && !cleanSession
         if (channel == null) {
+            log.warn("未发消息: 客户端ID=[{}]对应的channel不存在, cleanSession=[false], Topic=[{}], QoS=[{}], Payload=[{}], 连接当前节点=[{}], 缓存连接关系=[{}]",
+                    clientId, topic, qos, PAYLOAD_LOG_TYPE_HEX.equals(payloadLogType) ?
+                            BytesUtil.bytesToHexString(payload) : new String(payload, StandardCharsets.UTF_8),
+                    ConnectHandler.CLIENT_MAP.containsKey(clientId),
+                    ConnectHandler.ALL_CLIENT_MAP.containsKey(clientId));
+
             if ((qos == MqttQoS.EXACTLY_ONCE || qos == MqttQoS.AT_LEAST_ONCE) && !isClusterMessage) {
                 return sessionService.nextMessageId(clientId)
                         .flatMap(messageId -> {
@@ -465,9 +483,13 @@ public class PublishHandler extends AbstractMqttTopicSecureHandler implements Wa
                                                 Unpooled.wrappedBuffer(payload));
 
                                         if (Boolean.TRUE.equals(enableLog)) {
-                                            log.info("发送消息: 客户端ID=[{}], Topic=[{}], QoS=[{}], PacketId=[{}], Payload=[{}]",
-                                                    clientId, topic, qos, nextMessageId, PAYLOAD_LOG_TYPE_HEX.equals(payloadLogType) ?
-                                                            BytesUtil.bytesToHexString(payload) : new String(payload, StandardCharsets.UTF_8));
+                                            if (enablePayloadLog) {
+                                                log.info("发送消息: 客户端ID=[{}], Topic=[{}], QoS=[{}], PacketId=[{}], Payload=[{}]",
+                                                        clientId, topic, qos, nextMessageId, PAYLOAD_LOG_TYPE_HEX.equals(payloadLogType) ?
+                                                                BytesUtil.bytesToHexString(payload) : new String(payload, StandardCharsets.UTF_8));
+                                            } else {
+                                                log.info("发送消息: 客户端ID=[{}], Topic=[{}], QoS=[{}], PacketId=[{}]", clientId, topic, qos, nextMessageId);
+                                            }
                                         }
                                         channel.writeAndFlush(mpm);
                             });
@@ -488,9 +510,13 @@ public class PublishHandler extends AbstractMqttTopicSecureHandler implements Wa
         );
 
         if (Boolean.TRUE.equals(enableLog)) {
-            log.info("发送消息: 客户端ID=[{}], Topic=[{}], QoS=[{}], PacketId=[{}], Payload=[{}]",
-                    clientId, topic, qos, messageId, PAYLOAD_LOG_TYPE_HEX.equals(payloadLogType) ?
-                            BytesUtil.bytesToHexString(payload) : new String(payload, StandardCharsets.UTF_8));
+            if (enablePayloadLog) {
+                log.info("发送消息: 客户端ID=[{}], Topic=[{}], QoS=[{}], PacketId=[{}], Payload=[{}]",
+                        clientId, topic, qos, messageId, PAYLOAD_LOG_TYPE_HEX.equals(payloadLogType) ?
+                                BytesUtil.bytesToHexString(payload) : new String(payload, StandardCharsets.UTF_8));
+            } else {
+                log.info("发送消息: 客户端ID=[{}], Topic=[{}], QoS=[{}], PacketId=[{}]", clientId, topic, qos, messageId);
+            }
         }
         channel.writeAndFlush(mpm);
         return Mono.empty();

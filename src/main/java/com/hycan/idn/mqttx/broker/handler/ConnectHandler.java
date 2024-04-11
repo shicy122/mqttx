@@ -25,6 +25,7 @@ import com.hycan.idn.mqttx.exception.AuthenticationException;
 import com.hycan.idn.mqttx.pojo.Authentication;
 import com.hycan.idn.mqttx.pojo.ClientAuth;
 import com.hycan.idn.mqttx.pojo.ClientConnOrDiscMsg;
+import com.hycan.idn.mqttx.pojo.ConnectInfo;
 import com.hycan.idn.mqttx.pojo.InternalMessage;
 import com.hycan.idn.mqttx.pojo.PubMsg;
 import com.hycan.idn.mqttx.pojo.Session;
@@ -64,10 +65,7 @@ import reactor.core.scheduler.Schedulers;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
-import java.util.Collections;
-import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -81,16 +79,20 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class ConnectHandler extends AbstractMqttTopicSecureHandler implements Watcher {
     //@formatter:off
 
+    // 维护当前节点的 client <-> channel 关系
     public static final ConcurrentHashMap<String, ChannelId> CLIENT_MAP = new ConcurrentHashMap<>(10000);
-    public static final ConcurrentHashMap<String, String> ALL_CLIENT_MAP = new ConcurrentHashMap<>(10000);
+    // 维护所有节点的 client <-> 连接点 关系
+    public static final ConcurrentHashMap<String, ConnectInfo> ALL_CLIENT_MAP = new ConcurrentHashMap<>(10000);
     private static final String NONE_ID_PREFIX = "NONE_ID_";
     private final Serializer serializer;
     private final boolean enableTopicSubPubSecure;
-    private final String brokerId, currentInstanceId, CONNECT, AUTHORIZED;
+    private final String brokerId, currentInstanceId, CONNECT, AUTHORIZED, DISCONNECT;
     private final Boolean enableAuth, enableLog;
     private final List<String> adminUser;
+    private final Set<String> clientBlackList;
     private final int maxConnectSize;
     private final List<String> adminClientIdPrefix;
+    private final Double keepaliveRatio;
 
     /**
      * 认证服务
@@ -164,8 +166,16 @@ public final class ConnectHandler extends AbstractMqttTopicSecureHandler impleme
         this.maxConnectSize = config.getSysConfig().getMaxConnectSize();
         this.enableTopicSubPubSecure = config.getFilterTopic().getEnableTopicSubPubSecure();
         this.CONNECT = config.getKafka().getConnect();
+        this.DISCONNECT = config.getKafka().getDisconnect();
         this.AUTHORIZED = config.getKafka().getAuthorized();
         this.adminClientIdPrefix = config.getAuth().getAdminClientIdPrefix();
+        this.clientBlackList = config.getAuth().getClientBlackList();
+
+        if (config.getKeepaliveRatio() <= 0 || config.getKeepaliveRatio() > 3) {
+            this.keepaliveRatio = 1.5D;
+        } else {
+            this.keepaliveRatio = config.getKeepaliveRatio();
+        }
     }
 
     /**
@@ -186,6 +196,7 @@ public final class ConnectHandler extends AbstractMqttTopicSecureHandler impleme
         // 连接数量超过配置中的最大连接数时，拒绝连接
         if (maxConnectSize >= 0 && CLIENT_MAP.size() >= maxConnectSize) {
             log.error("当前节点的连接数量超过限制, 限制大小=[{}]", maxConnectSize);
+            ctx.close();
             return;
         }
 
@@ -204,6 +215,18 @@ public final class ConnectHandler extends AbstractMqttTopicSecureHandler impleme
             clientIdentifier = genClientId();
         }
         final var clientId = clientIdentifier; // for lambda
+        if (clientBlackList.contains(clientId)) {
+            MqttConnAckMessage mqttConnAckMessage = MqttMessageBuilders.connAck()
+                        .sessionPresent(false)
+                        .returnCode(MqttConnectReturnCode.CONNECTION_REFUSED_IDENTIFIER_REJECTED)
+                        .build();
+
+            // 告知客户端并关闭连接
+            ctx.writeAndFlush(mqttConnAckMessage);
+            ctx.close();
+            return;
+        }
+
         log.info("启动连接: 客户端ID=[{}], channel=[{}], R[{}]", clientId, ctx.channel().id(), clientAddress(ctx));
 
         ClientAuth clientAuth = ClientAuth.of(clientId, username, password);
@@ -301,7 +324,6 @@ public final class ConnectHandler extends AbstractMqttTopicSecureHandler impleme
     private void process0(ChannelHandlerContext ctx, MqttMessage msg, Authentication auth) {
         final var mcm = (MqttConnectMessage) msg;
         final var variableHeader = mcm.variableHeader();
-        final var payload = mcm.payload();
         final var channel = ctx.channel();
 
         // 获取clientId
@@ -315,12 +337,17 @@ public final class ConnectHandler extends AbstractMqttTopicSecureHandler impleme
                     .map(BrokerHandler.CHANNELS::find)
                     .filter(c -> !Objects.equals(c, channel))
                     .ifPresent(ChannelOutboundInvoker::close);
+        } else if (isClusterMode()) {
+            internalMessageService.publish(
+                    new InternalMessage<>(ClientConnOrDiscMsg.offline(clientId, currentInstanceId),
+                            System.currentTimeMillis(), brokerId), DISCONNECT);
         }
 
-        ClientConnOrDiscMsg connMsg = ClientConnOrDiscMsg.online(clientId, currentInstanceId);
-        if (isClusterMode()) {
-            internalMessageService.publish(
-                    new InternalMessage<>(connMsg, System.currentTimeMillis(), brokerId), CONNECT);
+        // 会话有效性检查
+        if (!channel.isActive()) {
+            instanceRouterService.clearAdminClientConnect(clientId).subscribe();
+            log.warn("会话失效: 客户端ID=[{}], channel=[{}]", clientId, channel.id().asShortText());
+            return;
         }
 
         // 会话状态的处理
@@ -333,63 +360,9 @@ public final class ConnectHandler extends AbstractMqttTopicSecureHandler impleme
             actionOnCleanSession(clientId)
                     .publishOn(Schedulers.boundedElastic())
                     .doOnSuccess(unused -> {
-                        // 新建会话并保存会话，同时判断sessionPresent
                         final var session = Session.of(clientId, true);
-                        CLIENT_MAP.put(clientId, channel.id());
-                        ALL_CLIENT_MAP.put(clientId, currentInstanceId);
-                        saveSessionWithChannel(ctx, session);
-                        if (enableTopicSubPubSecure) {
-                            saveAuthorizedTopics(ctx, auth);
-                            if (isClusterMode()) {
-                                internalMessageService.publish(
-                                        new InternalMessage<>(auth, System.currentTimeMillis(), brokerId), AUTHORIZED);
-                            }
-                        }
 
-                        // 处理遗嘱消息
-                        // [MQTT-3.1.2-8] If the Will Flag is set to 1 this indicates that, if the Connect request is accepted, a Will
-                        // Message MUST be stored on the Server and associated with the Network Connection. The Will Message MUST be
-                        // published when the Network Connection is subsequently closed unless the Will Message has been deleted by the
-                        // Server on receipt of a DISCONNECT Packet.
-                        boolean willFlag = variableHeader.isWillFlag();
-                        if (willFlag) {
-                            var pubMsg = PubMsg.of(variableHeader.willQos(), payload.willTopic(),
-                                    variableHeader.isWillRetain(), payload.willMessageInBytes());
-                            pubMsg.setWill(true);
-                            session.setWillMessage(pubMsg);
-                        }
-
-                        // 返回连接响应
-                        var acceptAck = MqttMessageBuilders.connAck()
-                                .sessionPresent(false)
-                                .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
-                                .build();
-                        ctx.writeAndFlush(acceptAck);
-
-                        // 连接成功相关处理
-                        sysMessageService.onlineNotice(connMsg)
-                                .doOnError(t -> log.error(t.getMessage(), t))
-                                .subscribe();
-                        sysMessageService.publishSysBridge(connMsg);
-
-                        if (!channel.isActive()) {
-                            instanceRouterService.clearAdminClientConnect(session.getClientId()).subscribe();
-                            log.warn("会话失效: 客户端ID=[{}], channel=[{}]", clientId, channel.id().asShortText());
-                            return;
-                        }
-
-                        // 心跳超时设置
-                        // [MQTT-3.1.2-24] If the Keep Alive value is non-zero and the Server does not receive a Control Packet from
-                        // the Client within one and a half times the Keep Alive time period, it MUST disconnect the Network Connection
-                        // to the Client as if the network had failed
-                        double heartbeat = variableHeader.keepAliveTimeSeconds() * 1.5;
-                        if (heartbeat > 0) {
-                            // 替换掉 NioChannelSocket 初始化时加入的 idleHandler
-                            ctx.pipeline()
-                                    .replace(IdleStateHandler.class, "idleHandler", new IdleStateHandler(
-                                            0, 0, (int) heartbeat));
-                        }
-                        log.info("连接成功: 客户端ID=[{}], channel=[{}]", clientId, channel.id());
+                        onClientConnect(ctx, auth, mcm, session, false);
                     })
                     .doOnError(t -> log.error(t.getMessage(), t))
                     .subscribe();
@@ -406,69 +379,80 @@ public final class ConnectHandler extends AbstractMqttTopicSecureHandler impleme
                             sessionPresent = true;
                         }
 
-                        CLIENT_MAP.put(clientId, ctx.channel().id());
-                        ALL_CLIENT_MAP.put(clientId, currentInstanceId);
-                        saveSessionWithChannel(ctx, session);
-                        if (enableTopicSubPubSecure) {
-                            saveAuthorizedTopics(ctx, auth);
-                            if (isClusterMode()) {
-                                internalMessageService.publish(
-                                        new InternalMessage<>(auth, System.currentTimeMillis(), brokerId), AUTHORIZED);
-                            }
-                        }
-
-                        // 处理遗嘱消息
-                        // [MQTT-3.1.2-8] If the Will Flag is set to 1 this indicates that, if the Connect request is accepted, a Will
-                        // Message MUST be stored on the Server and associated with the Network Connection. The Will Message MUST be
-                        // published when the Network Connection is subsequently closed unless the Will Message has been deleted by the
-                        // Server on receipt of a DISCONNECT Packet.
-                        var willFlag = variableHeader.isWillFlag();
-                        if (willFlag) {
-                            var pubMsg = PubMsg.of(variableHeader.willQos(), payload.willTopic(),
-                                    variableHeader.isWillRetain(), payload.willMessageInBytes());
-                            pubMsg.setWill(true);
-                            session.setWillMessage(pubMsg);
-                        }
-
-                        // 返回连接响应
-                        var acceptAck = MqttMessageBuilders.connAck()
-                                .sessionPresent(sessionPresent)
-                                .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
-                                .build();
-                        ctx.writeAndFlush(acceptAck);
-
-                        // 连接成功相关处理
-                        sysMessageService.onlineNotice(connMsg)
-                                .doOnError(t -> log.error(t.getMessage(), t))
-                                .subscribe();
-
-                        // 会话有效性检查
-                        if (!channel.isActive()) {
-                            instanceRouterService.clearAdminClientConnect(session.getClientId()).subscribe();
-                            log.warn("会话失效: 客户端ID=[{}], channel=[{}]", clientId, channel.id().asShortText());
-                            return;
-                        }
-
-                        // 心跳超时设置
-                        // [MQTT-3.1.2-24] If the Keep Alive value is non-zero and the Server does not receive a Control Packet from
-                        // the Client within one and a half times the Keep Alive time period, it MUST disconnect the Network Connection
-                        // to the Client as if the network had failed
-                        var heartbeat = variableHeader.keepAliveTimeSeconds() * 1.5;
-                        if (heartbeat > 0) {
-                            // 替换掉 NioChannelSocket 初始化时加入的 idleHandler
-                            ctx.pipeline().replace(IdleStateHandler.class, "idleHandler", new IdleStateHandler(
-                                    0, 0, (int) heartbeat));
-                        }
+                        onClientConnect(ctx, auth, mcm, session, sessionPresent);
 
                         // 根据协议补发 qos1,与 qos2 的消息(注意: 这里补发的是缓存中的消息，数据库中的消息由定时任务补发)
                         publishMessageService.search(clientId)
                                 .publishOn(Schedulers.boundedElastic())
                                 .doOnNext(pubMsg -> publishMessageService.republish(pubMsg).subscribe())
                                 .subscribe();
-                        log.info("连接成功: 客户端ID=[{}], channel=[{}]", clientId, channel.id());
                     })
                     .doOnError(t -> log.error(t.getMessage(), t))
                     .subscribe();
+        }
+    }
+
+    private void onClientConnect(ChannelHandlerContext ctx, Authentication auth, MqttConnectMessage mcm, Session session, boolean sessionPresent) {
+        final var channel = ctx.channel();
+        final var variableHeader = mcm.variableHeader();
+        final var payload = mcm.payload();
+        final var clientId = auth.getClientId();
+
+        // 心跳超时设置(协议标准是1.5倍, 如无法满足业务场景, 支持修改系数区间为(0, 3] )
+        // [MQTT-3.1.2-24] If the Keep Alive value is non-zero and the Server does not receive a Control Packet from
+        // the Client within one and a half times the Keep Alive time period, it MUST disconnect the Network Connection
+        // to the Client as if the network had failed
+        var heartbeat = variableHeader.keepAliveTimeSeconds() * keepaliveRatio;
+        if (heartbeat > 0) {
+            // 替换掉 NioChannelSocket 初始化时加入的 idleHandler
+            ctx.pipeline().replace(IdleStateHandler.class, "idleHandler", new IdleStateHandler(
+                    0, 0, (int) heartbeat));
+        }
+
+        ClientConnOrDiscMsg connMsg = ClientConnOrDiscMsg.online(clientId, channel.id(), currentInstanceId);
+
+        CLIENT_MAP.put(clientId, ctx.channel().id());
+        ALL_CLIENT_MAP.put(clientId, ConnectInfo.of(currentInstanceId, connMsg.getTimestamp()));
+        // 保存ACL策略，并发布集群消息
+        if (enableTopicSubPubSecure) {
+            saveAuthorizedTopics(ctx, auth);
+            if (isClusterMode()) {
+                internalMessageService.publish(
+                        new InternalMessage<>(auth, System.currentTimeMillis(), brokerId), AUTHORIZED);
+            }
+        }
+        saveSessionWithChannel(ctx, session);
+        log.info("连接成功: 客户端ID=[{}], channel=[{}]", clientId, channel.id());
+
+        // 处理遗嘱消息
+        // [MQTT-3.1.2-8] If the Will Flag is set to 1 this indicates that, if the Connect request is accepted, a Will
+        // Message MUST be stored on the Server and associated with the Network Connection. The Will Message MUST be
+        // published when the Network Connection is subsequently closed unless the Will Message has been deleted by the
+        // Server on receipt of a DISCONNECT Packet.
+        var willFlag = variableHeader.isWillFlag();
+        if (willFlag) {
+            var pubMsg = PubMsg.of(variableHeader.willQos(), payload.willTopic(),
+                    variableHeader.isWillRetain(), payload.willMessageInBytes());
+            pubMsg.setWill(true);
+            session.setWillMessage(pubMsg);
+        }
+
+        // 返回连接响应
+        var acceptAck = MqttMessageBuilders.connAck()
+                .sessionPresent(sessionPresent)
+                .returnCode(MqttConnectReturnCode.CONNECTION_ACCEPTED)
+                .build();
+        ctx.writeAndFlush(acceptAck);
+
+        // 上线消息通知
+        sysMessageService.onlineNotice(connMsg)
+                .doOnError(t -> log.error(t.getMessage(), t))
+                .subscribe();
+        sysMessageService.publishSysBridge(connMsg);
+
+        if (isClusterMode()) {
+            internalMessageService.publish(
+                    new InternalMessage<>(connMsg, System.currentTimeMillis(), brokerId), CONNECT);
         }
     }
 
@@ -502,7 +486,7 @@ public final class ConnectHandler extends AbstractMqttTopicSecureHandler impleme
                 .flatMap(e -> {
                     if (e) {
                         return Mono.when(
-                                subscriptionService.clearClientSubscriptions(clientId, false),
+                                subscriptionService.clearClientSubscriptions(clientId, false, true),
                                 publishMessageService.clear(clientId),
                                 pubRelMessageService.clear(clientId));
                     } else {
@@ -544,16 +528,16 @@ public final class ConnectHandler extends AbstractMqttTopicSecureHandler impleme
             im = serializer.deserialize(msg, InternalMessage.class);
         }
 
-        Optional.ofNullable(im.getData())
-                .map(data -> {
-                    String clientId = data.getClientId();
-                    String instanceId = data.getInstanceId();
-                    ALL_CLIENT_MAP.put(clientId, instanceId);
-                    return clientId;
-                })
-                .map(ConnectHandler.CLIENT_MAP::remove)
-                .map(BrokerHandler.CHANNELS::find)
-                .map(ChannelOutboundInvoker::close);
+        ClientConnOrDiscMsg imMsg = im.getData();
+        if (Objects.isNull(imMsg)) {
+            return;
+        }
+
+        String clientId = imMsg.getClientId();
+        ALL_CLIENT_MAP.put(imMsg.getClientId(), ConnectInfo.of(imMsg.getInstanceId(), imMsg.getTimestamp()));
+        log.info("集群消息-连接成功: 客户端ID=[{}], channel=[{}], 连接当前节点=[{}], 缓存连接关系=[{}]",
+                clientId, imMsg.getChannelId(), ConnectHandler.CLIENT_MAP.containsKey(clientId),
+                ConnectHandler.ALL_CLIENT_MAP.containsKey(clientId));
     }
 
     @Override
