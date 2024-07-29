@@ -28,21 +28,13 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static com.hycan.idn.mqttx.constants.ShareStrategyEnum.hash;
-import static com.hycan.idn.mqttx.constants.ShareStrategyEnum.random;
-import static com.hycan.idn.mqttx.constants.ShareStrategyEnum.round;
+import static com.hycan.idn.mqttx.constants.ShareStrategyEnum.*;
 
 /**
  * 主题订阅服务.
@@ -66,8 +58,9 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
      * 共享主题轮询策略
      */
     private final ShareStrategyEnum shareStrategyEnum;
-    private final boolean enableCluster, enableShareTopic, enableFilterTopic, enableLog;
-    private final String brokerId, topicPrefix, topicSuffix, SUB_UNSUB;
+    private final boolean enableCluster, enableShareTopic, enableFilterTopicPrefix, enableFilterTopicSuffix, enableLog;
+    private final String brokerId, SUB_UNSUB;
+    private final Set<String> topicPrefixSet, topicSuffixSet;
     /**
      * 共享订阅轮询，存储轮询参数
      */
@@ -124,9 +117,17 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
         this.SUB_UNSUB = mqttxConfig.getKafka().getSubOrUnsub();
 
         MqttxConfig.FilterTopic filterTopic = mqttxConfig.getFilterTopic();
-        this.enableFilterTopic = filterTopic.getEnable();
-        this.topicPrefix = filterTopic.getTopicPrefix();
-        this.topicSuffix = filterTopic.getTopicSuffix();
+        this.enableFilterTopicPrefix = filterTopic.getEnablePrefix();
+        this.topicPrefixSet = filterTopic.getTopicPrefix();
+        if (this.enableFilterTopicPrefix && CollectionUtils.isEmpty(this.topicPrefixSet)) {
+            throw new IllegalArgumentException("MQTTX已开启Topic前缀匹配，topic-prefix-set配置不能为空");
+        }
+
+        this.enableFilterTopicSuffix = filterTopic.getEnableSuffix();
+        this.topicSuffixSet = filterTopic.getTopicSuffix();
+        if (this.enableFilterTopicSuffix && CollectionUtils.isEmpty(this.topicSuffixSet)) {
+            throw new IllegalArgumentException("MQTTX已开启Topic后缀匹配，topic-suffix-set配置不能为空");
+        }
 
         initInnerCache();
     }
@@ -253,7 +254,7 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
             });
         }
 
-        if (!enableFilterTopic || topic.startsWith(topicPrefix) || topic.endsWith(topicSuffix)) {
+        if (enableTopicFilter(topic)) {
             List<ClientSub> shareClientSubList = new ArrayList<>();
             for (String subTopic : incWildcardOrShareTopics) {
                 if (TopicUtils.match(topic, subTopic)) {
@@ -279,6 +280,22 @@ public class SubscriptionServiceImpl implements ISubscriptionService, Watcher {
             log.warn("订阅Topic=[{}]的客户端列表为空!", topic);
         }
         return Flux.fromIterable(clientSubList);
+    }
+
+    private boolean enableTopicFilter(String topic) {
+        if (enableFilterTopicPrefix) {
+            String topicPrefix = topic.substring(0, topic.indexOf("/"));
+            if (topicPrefixSet.contains(topicPrefix)) {
+                return true;
+            }
+        }
+
+        if (enableFilterTopicSuffix) {
+            String topicSuffix = topic.substring(topic.lastIndexOf("/") + 1);
+            return topicSuffixSet.contains(topicSuffix);
+        }
+
+        return false;
     }
 
     /**

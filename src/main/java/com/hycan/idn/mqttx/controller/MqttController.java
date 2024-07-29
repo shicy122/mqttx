@@ -165,7 +165,7 @@ public class MqttController {
     }
 
     /**
-     * 添加或更新用户信息
+     * 添加用户信息
      *
      * @param userInfo 用户信息
      * @return Void

@@ -138,9 +138,9 @@ public class BrokerInitializer implements DisposableBean {
         log.info(String.format("MQTTX Broker 配置:\n%s", JSON.writeValueAsPrettyString(mqttxConfig)));
 
         if (Epoll.isAvailable()) {
-            log.info("Epoll 可用，启用: {}", EpollEventLoopGroup.class.getName());
+            log.info("Epoll 可用, 启用: {}, CPU核数: {}", EpollEventLoopGroup.class.getName(), Runtime.getRuntime().availableProcessors());
         } else {
-            log.info("Epoll 不可用，启用: {}", NioEventLoopGroup.class.getName());
+            log.info("Epoll 不可用, 启用: {}, CPU核数: {}", NioEventLoopGroup.class.getName(), Runtime.getRuntime().availableProcessors());
         }
     }
 

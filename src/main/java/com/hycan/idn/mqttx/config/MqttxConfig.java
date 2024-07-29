@@ -267,14 +267,17 @@ public class MqttxConfig {
     @Data
     public static class FilterTopic {
 
-        /** 开关 */
-        private Boolean enable = false;
+        /** 开启前缀匹配开关 */
+        private Boolean enablePrefix = false;
 
         /** topic 前缀 */
-        private String topicPrefix;
+        private Set<String> topicPrefix = new HashSet<>();
+
+        /** 开启后缀匹配开关 */
+        private Boolean enableSuffix = false;
 
         /** topic 后缀 */
-        private String topicSuffix;
+        private Set<String> topicSuffix = new HashSet<>();
 
         /** 主题安全订阅开关，默认关 */
         private Boolean enableTopicSubPubSecure = false;

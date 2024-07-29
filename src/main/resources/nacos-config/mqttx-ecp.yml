@@ -1,0 +1,137 @@
+spring:
+  redis:
+    cluster:
+      nodes: 172.25.250.71:6379,172.25.250.15:6379,172.25.250.45:6379,172.25.250.123:6379,172.25.250.155:6379,172.25.250.52:6379
+    password: rdUltFZnx71bo3GL
+    timeout: 10000
+    lettuce:
+      shutdown-timeout: 0
+      pool:
+        max-active: 8
+        max-wait: -1
+        max-idle: 500
+        min-idle: 1
+  cloud:
+    discovery:
+      client:
+        health-indicator:
+          enabled: false
+
+  data:
+    mongodb:
+      uri: mongodb://ecp-mqttx-prod:aZgx*4!m!C8W@172.25.250.138:8635,172.25.250.239:8635/ecp-mqttx-prod?authSource=admin
+      auto-index-creation: true
+
+  kafka:
+    listener:
+      ack-mode: manual-immediate
+      type: batch
+    consumer:
+      bootstrap-servers: 172.25.240.134:9092,172.25.240.22:9092,172.25.240.200:9092
+      group-id: mqttx-group
+      #Kafka中没有初始偏移或如果当前偏移在服务器上不再存在时,默认区最新 ，有三个选项 【latest, earliest, none】
+      auto-offset-reset: latest
+      #是否开启自动提交
+      enable-auto-commit: false
+      #自动提交的时间间隔
+      auto-commit-interval: 10s
+      session-timeout-ms: 15000
+      max-poll-records: 1000
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+    #生产者的配置，大部分我们可以使用默认的，这里列出几个比较重要的属性
+    producer:
+      bootstrap-servers: 172.25.240.134:9092,172.25.240.22:9092,172.25.240.200:9092
+      acks: 1
+      #每批次发送消息的数量
+      batch-size: 1000
+      #设置大于0的值将使客户端重新发送任何数据，一旦这些数据发送失败。注意，这些重试与客户端接收到发送错误时的重试没有什么不同。允许重试将潜在的改变数据的顺序，如果这两个消息记录都是发送到同一个partition，则第一个消息失败第二个发送成功，则第二条消息会比第一条消息出现要早。
+      retries: 1
+      #producer可以用来缓存数据的内存大小。如果数据产生速度大于向broker发送的速度，producer会阻塞或者抛出异常，以“block.on.buffer.full”来表明。这项设置将和producer能够使用的总内存相关，但并不是一个硬性的限制，因为不是producer使用的所有内存都是用于缓存。一些额外的内存会用于压缩（如果引入压缩机制），同样还有一些用于维护请求。
+      buffer-memory: 33554432
+      linger-ms: 10
+      #key序列化方式
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+    # 自定义健康检查
+    health:
+      group:
+        readiness:
+          include:
+            - ping
+            - custom
+  endpoint:
+    health:
+      show-details: ALWAYS
+  health:
+    nacosConfig:
+      enabled: false
+    nacosDiscovery:
+      enabled: false
+
+mqttx:
+  cluster:
+    enable: true
+  web-socket:
+    enable: true
+  sys-topic:
+    enable: true
+  share-topic:
+    enable: true
+  filter-topic:
+    enable: true
+    topic-prefix: up
+    enable-topic-sub-pub-secure: true
+  message-bridge:
+    enable-biz: true
+    mqtt-biz-topic-pattern: ^(up\/pile)\/([0-9]{1,15})\/(amount_update|trade_record)$
+    kafka-biz-bridge-topic: ecp-mqttx-bridge-biz
+    enable-sys: true
+    kafka-sys-bridge-topic: ecp-mqttx-bridge-sys
+  auth:
+    enable: true
+    admin-user: admin
+    admin-client-id-prefix:
+      - ECP_ADPT_PUB
+      - ECP_ADPT_SUB
+    endpoint-map:
+      pile: http://ecp-ems.hycan-ecp-pro.svc.cluster.local:6004/ems-svc/v1/mqtt/auth
+  sys-config:
+    enable-log: true
+    payload-log-type: hex
+    enable-proxy-addr: false
+  redis:
+    inner-pwd-str-prefix-timeout: 168
+    pub-rel-msg-set-prefix: 'ecp:mqttx:client:msg:pubrel:'
+    message-id-inc-prefix: 'ecp:mqttx:client:messageid:'
+    client-sys-msg-prefix: 'ecp:mqttx:client:sysmsg:'
+    admin-key-str-prefix: 'ecp:mqttx:client:innerpwd:'
+    admin-conn-hash-prefix: 'ecp:mqttx:client:admin:conn'
+  kafka:
+    group-id-prefix: ecp-
+    sync: ecp-mqttx-internal-sync
+    pub: ecp-mqttx-internal-pub
+    pub-ack: ecp-mqttx-internal-puback
+    pub-rec: ecp-mqttx-internal-pubrec
+    pub-com: ecp-mqttx-internal-pubcom
+    pub-rel: ecp-mqttx-internal-pubrel
+    connect: ecp-mqttx-internal-connect
+    disconnect: ecp-mqttx-internal-disconnect
+    authorized: ecp-mqttx-internal-authorized
+    sub-or-unsub: ecp-mqttx-internal-suborunsub
+  max-bytes-in-message: 16384
+  max-client-id-length: 33
+  ignore-client-self-pub: false
+  serialize-strategy: kryo
+
+logging:
+  level:
+    root: info
+  file:
+    path: mqttx/logs

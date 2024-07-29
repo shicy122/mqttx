@@ -206,6 +206,6 @@ public class Session {
     }
 
     public boolean isDupMsg(int messageId) {
-        return outPubRelMsgStore.contains(messageId);
+        return inPubRelMsgStore.contains(messageId);
     }
 }

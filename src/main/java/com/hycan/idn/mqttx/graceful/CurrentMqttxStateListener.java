@@ -99,6 +99,7 @@ public class CurrentMqttxStateListener implements Watcher {
 
     @EventListener(condition = "T(com.hycan.idn.mqttx.graceful.event.MqttxStateEvent).INSTANCE_SHUTDOWN.equals(#event.state)")
     public void instanceShutdown(MqttxStateEvent event) {
+        mqttxHealthIndicator.setHealth(false);
         List<String> offlineInstanceList = event.getInstanceIds();
         if (!offlineInstanceList.contains(currentInstanceId)) {
             return;
